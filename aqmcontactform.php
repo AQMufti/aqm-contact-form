@@ -3,7 +3,7 @@
  * Plugin Name:       A. Q. Mufti - Contact Form
  * Plugin URI:        https://github.com/AQMufti/aqm-contact-form
  * Description:       Multi-form builder with combobox fields. Each form has independent fields, dropdowns, editable comboboxes, CAPTCHA, spam protection and required/optional settings. Shortcode: [aqm_form id="N"]
- * Version:           7.1.0
+ * Version:           7.1.1
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            A. Q. Mufti
@@ -16,7 +16,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'AQM_VERSION', '7.1.0' );
+define( 'AQM_VERSION', '7.1.1' );
 define( 'AQM_DB_VERSION', 8 );
 define( 'AQM_FILE', __FILE__ );
 
@@ -2499,29 +2499,14 @@ function aqm_plugin_details( $result, $action, $args ) {
 	);
 }
 
-add_filter( 'upgrader_source_selection', 'aqm_correct_source_dir', 10, 4 );
-
-function aqm_correct_source_dir( $source, $remote_source, $upgrader, $hook_extra = null ) {
-	global $wp_filesystem;
-
-	if ( empty( $hook_extra['plugin'] ) || plugin_basename( AQM_FILE ) !== $hook_extra['plugin'] ) {
-		return $source;
-	}
-	if ( ! $wp_filesystem ) {
-		return $source;
-	}
-
-	$desired = trailingslashit( $remote_source ) . dirname( plugin_basename( AQM_FILE ) );
-
-	if ( trailingslashit( $source ) === trailingslashit( $desired ) ) {
-		return $source;
-	}
-	if ( $wp_filesystem->move( $source, $desired, true ) ) {
-		return trailingslashit( $desired );
-	}
-
-	return new WP_Error( 'aqm_rename_failed', 'The update was downloaded but its folder could not be renamed. Please install it manually.' );
-}
+/*
+ * NOTE: v7.1.0 carried an upgrader_source_selection filter that renamed the
+ * unpacked folder to match the installed one. On an upload-overwrite it moved
+ * the folder inside itself, producing aqm-contact-form/aqm-contact-form/ and
+ * a plugin WordPress could not activate. It has been removed: every release
+ * ships a ZIP whose top-level folder is already aqm-contact-form, so the
+ * safety net was solving a problem that does not occur, and caused one.
+ */
 
 add_action( 'upgrader_process_complete', 'aqm_clear_release_cache', 10, 0 );
 
