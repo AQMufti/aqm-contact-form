@@ -1,16 +1,14 @@
 <?php
 /**
- * Plugin Name:       A. Q. Mufti – Contact Form
+ * Plugin Name:       A. Q. Mufti - Contact Form
  * Plugin URI:        https://github.com/AQMufti/aqm-contact-form
- * Description:       Contact form with email notification, database storage, admin-managed event types, spam protection and CSV export.
- * Version:           2.3.0
+ * Description:       Multi-form builder with combobox fields. Each form has independent fields, dropdowns, editable comboboxes, CAPTCHA, spam protection and required/optional settings. Shortcode: [aqm_form id="N"]
+ * Version:           7.1.0
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            A. Q. Mufti
  * Author URI:        https://github.com/AQMufti
  * License:           GPL-2.0-or-later
- * License URI:       https://www.gnu.org/licenses/gpl-2.0.html
- * Text Domain:       aqm-contact-form
  * Update URI:        https://github.com/AQMufti/aqm-contact-form
  */
 
@@ -18,311 +16,350 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'AQM_CF_VERSION', '2.3.0' );
-define( 'AQM_CF_DB_VERSION', 3 );
-define( 'AQM_CF_FILE', __FILE__ );
+define( 'AQM_VERSION', '7.1.0' );
+define( 'AQM_DB_VERSION', 8 );
+define( 'AQM_FILE', __FILE__ );
 
-// GitHub repository this plugin updates itself from, as "owner/repo".
-if ( ! defined( 'AQM_CF_GITHUB_REPO' ) ) {
-	define( 'AQM_CF_GITHUB_REPO', 'AQMufti/aqm-contact-form' );
+if ( ! defined( 'AQM_GITHUB_REPO' ) ) {
+	define( 'AQM_GITHUB_REPO', 'AQMufti/aqm-contact-form' );
 }
 
-/* ═══════════════════════════════════════════════════════════════════════
-   1. SCHEMA — install, versioned upgrades, seed data
-   ═══════════════════════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════════════
+   1. SCHEMA - install and versioned upgrades
 
-register_activation_hook( __FILE__, 'aqm_cf_install' );
+   v7.0.0 ran SHOW COLUMNS on plugins_loaded for EVERY request,
+   front end included. That is one guaranteed extra query on every
+   page view forever. A stored version number does the same job free.
+   ══════════════════════════════════════════════════════════════ */
 
-function aqm_cf_entries_table() {
+register_activation_hook( __FILE__, 'aqm_install' );
+
+function aqm_table( $name ) {
 	global $wpdb;
-	return $wpdb->prefix . 'aqm_contact_entries';
+	return $wpdb->prefix . 'aqm_' . $name;
 }
 
-function aqm_cf_event_types_table() {
-	global $wpdb;
-	return $wpdb->prefix . 'aqm_event_types';
+add_action( 'plugins_loaded', 'aqm_maybe_upgrade' );
+
+function aqm_maybe_upgrade() {
+	if ( (int) get_option( 'aqm_db_version', 0 ) < AQM_DB_VERSION ) {
+		aqm_install();
+	}
 }
 
-/**
- * Create/upgrade tables. Safe to run repeatedly — dbDelta diffs the schema.
- */
-function aqm_cf_install() {
+function aqm_install() {
 	global $wpdb;
 
 	require_once ABSPATH . 'wp-admin/includes/upgrade.php';
-
 	$charset = $wpdb->get_charset_collate();
-	$entries = aqm_cf_entries_table();
-	$types   = aqm_cf_event_types_table();
 
-	// NOTE: dbDelta is picky. No "IF NOT EXISTS", one field per line,
-	// lowercase types, and TWO spaces after "PRIMARY KEY".
-	$sql_entries = "CREATE TABLE $entries (
-		id bigint(20) unsigned NOT NULL auto_increment,
-		name varchar(120) NOT NULL,
-		email varchar(120) NOT NULL,
-		phone varchar(30) NOT NULL default '',
-		event_type_id int(10) unsigned NOT NULL default 0,
-		event_type varchar(120) NOT NULL,
-		message text NOT NULL,
-		consent tinyint(1) NOT NULL default 0,
-		ip_address varchar(45) NOT NULL default '',
-		user_agent varchar(255) NOT NULL default '',
-		submitted_at datetime NOT NULL,
-		PRIMARY KEY  (id),
-		KEY submitted_at (submitted_at),
-		KEY email (email),
-		KEY event_type_id (event_type_id)
-	) $charset;";
+	$forms   = aqm_table( 'forms' );
+	$fields  = aqm_table( 'form_fields' );
+	$options = aqm_table( 'field_options' );
+	$entries = aqm_table( 'contact_entries' );
 
-	$sql_types = "CREATE TABLE $types (
-		id int(10) unsigned NOT NULL auto_increment,
-		label varchar(120) NOT NULL,
-		sort_order int(11) NOT NULL default 0,
-		PRIMARY KEY  (id),
-		KEY sort_order (sort_order)
-	) $charset;";
-
-	dbDelta( $sql_entries );
-	dbDelta( $sql_types );
-
-	// Seed default event types only on a genuinely empty table. add_option()
-	// relies on the unique index on option_name, so if two requests race
-	// through this upgrade at once only one of them wins and seeds.
-	$count = (int) $wpdb->get_var( "SELECT COUNT(*) FROM $types" ); // phpcs:ignore WordPress.DB.PreparedSQL
-	if ( 0 === $count && add_option( 'aqm_cf_seeded', 1, '', 'no' ) ) {
-		// Neutral starting list, ordered roughly by how often each is picked.
-		// Every one of these can be renamed, reordered or deleted under
-		// AQM Contact → Event Types.
-		$defaults = array(
-			'General Enquiry',
-			'Event Booking',
-			'Request a Quote',
-			'Wedding or Private Celebration',
-			'Corporate or Business Event',
-			'Conference or Seminar',
-			'Workshop or Training',
-			'Fundraiser or Charity Event',
-			'Speaker or Presentation Request',
-			'Media or Press Enquiry',
-			'Partnership or Sponsorship',
-			'Other',
-		);
-		foreach ( $defaults as $i => $label ) {
-			$wpdb->insert(
-				$types,
-				array(
-					'label'      => $label,
-					'sort_order' => $i + 1,
-				),
-				array( '%s', '%d' )
-			);
-		}
-	}
-
-	// Backfill event_type_id for rows migrated from v2.0.
-	$wpdb->query( // phpcs:ignore WordPress.DB.PreparedSQL, WordPress.DB.DirectDatabaseQuery
-		"UPDATE $entries e
-		 JOIN $types t ON t.label = e.event_type
-		 SET e.event_type_id = t.id
-		 WHERE e.event_type_id = 0"
+	// dbDelta is a schema differ, not a CREATE statement. It needs no
+	// IF NOT EXISTS, lowercase types, one field per line, and TWO spaces
+	// after PRIMARY KEY. v7.0.0 broke all three, so it could create tables
+	// but never correctly upgrade them.
+	dbDelta(
+		"CREATE TABLE $forms (
+			id int(10) unsigned NOT NULL auto_increment,
+			form_name varchar(120) NOT NULL,
+			notify_email varchar(120) NOT NULL default '',
+			notify_cc varchar(255) NOT NULL default '',
+			email_subject varchar(200) NOT NULL default 'New Contact Form Submission',
+			captcha_enabled tinyint(1) NOT NULL default 1,
+			spam_protection tinyint(1) NOT NULL default 1,
+			autoreply_enabled tinyint(1) NOT NULL default 0,
+			autoreply_subject varchar(200) NOT NULL default 'We received your message',
+			autoreply_body text NOT NULL,
+			success_message varchar(255) NOT NULL default '',
+			store_ip tinyint(1) NOT NULL default 1,
+			created_at datetime NOT NULL,
+			PRIMARY KEY  (id)
+		) $charset;"
 	);
 
-	// Rows created before submitted_at was always supplied.
-	$wpdb->query( // phpcs:ignore WordPress.DB.PreparedSQL, WordPress.DB.DirectDatabaseQuery
-		"UPDATE $entries SET submitted_at = '1970-01-01 00:00:00' WHERE submitted_at IS NULL"
+	dbDelta(
+		"CREATE TABLE $fields (
+			id int(10) unsigned NOT NULL auto_increment,
+			form_id int(10) unsigned NOT NULL,
+			field_key varchar(80) NOT NULL,
+			label varchar(120) NOT NULL,
+			field_type varchar(30) NOT NULL default 'text',
+			placeholder varchar(200) NOT NULL default '',
+			required tinyint(1) NOT NULL default 1,
+			enabled tinyint(1) NOT NULL default 1,
+			sort_order int(11) NOT NULL default 0,
+			PRIMARY KEY  (id),
+			KEY form_id (form_id)
+		) $charset;"
 	);
 
-	update_option( 'aqm_cf_db_version', AQM_CF_DB_VERSION );
-	aqm_cf_flush_event_type_cache();
-}
-
-/**
- * Activation only fires on activation — this catches plugin updates too.
- */
-add_action( 'plugins_loaded', 'aqm_cf_maybe_upgrade' );
-
-function aqm_cf_maybe_upgrade() {
-	if ( (int) get_option( 'aqm_cf_db_version', 0 ) < AQM_CF_DB_VERSION ) {
-		aqm_cf_install();
-	}
-}
-
-add_action( 'init', 'aqm_cf_load_textdomain' );
-
-function aqm_cf_load_textdomain() {
-	load_plugin_textdomain( 'aqm-contact-form', false, dirname( plugin_basename( AQM_CF_FILE ) ) . '/languages' );
-}
-
-/* ═══════════════════════════════════════════════════════════════════════
-   2. SETTINGS
-   ═══════════════════════════════════════════════════════════════════════ */
-
-function aqm_cf_default_settings() {
-	return array(
-		// Defaults to the site's own admin address. The real recipient is set
-		// on the settings screen, so it lives in the database rather than in
-		// this file — which matters if the source is ever published.
-		'notify_email'    => (string) get_option( 'admin_email' ),
-		'notify_cc'       => '',
-		'autoreply'       => 1,
-		'autoreply_subject' => 'We received your message',
-		'autoreply_body'  => "Dear {name},\n\nThank you for getting in touch. We have received your message regarding \"{event_type}\" and will be in touch shortly.\n\nFor your records, here is what you sent:\n\n{message}\n\nWarm regards,\n{site_name}",
-		'success_message' => 'Thank you, {name}! Your message has been received. We will be in touch soon.',
-		'field_label'     => 'Type of Event',
-		'consent_enabled' => 0,
-		'consent_text'    => 'I consent to my details being stored so that my enquiry can be answered.',
-		'spam_protection' => 1,
-		'rate_limit'      => 5,
-		'max_links'       => 4,
-		'proxy_header'    => '',
-		'store_ip'        => 1,
-		'anonymise_ip'    => 0,
-		'delete_on_uninstall' => 0,
+	dbDelta(
+		"CREATE TABLE $options (
+			id int(10) unsigned NOT NULL auto_increment,
+			field_id int(10) unsigned NOT NULL,
+			label varchar(120) NOT NULL,
+			sort_order int(11) NOT NULL default 0,
+			PRIMARY KEY  (id),
+			KEY field_id (field_id)
+		) $charset;"
 	);
-}
 
-function aqm_cf_get_settings() {
-	static $cached = null;
-	if ( null === $cached ) {
-		$cached = wp_parse_args( (array) get_option( 'aqm_cf_settings', array() ), aqm_cf_default_settings() );
-	}
-	return $cached;
-}
-
-function aqm_cf_setting( $key ) {
-	$settings = aqm_cf_get_settings();
-	return $settings[ $key ] ?? null;
-}
-
-/**
- * What the dropdown is called on the form and in the admin tables. "Type of
- * Event" by default, but a photographer might want "Session Type" and a
- * charity "Reason for Contact".
- */
-function aqm_cf_field_label() {
-	$label = trim( (string) aqm_cf_setting( 'field_label' ) );
-	return '' === $label ? __( 'Type of Event', 'aqm-contact-form' ) : $label;
-}
-
-add_action( 'admin_init', 'aqm_cf_register_settings' );
-
-function aqm_cf_register_settings() {
-	register_setting(
-		'aqm_cf_settings_group',
-		'aqm_cf_settings',
-		array( 'sanitize_callback' => 'aqm_cf_sanitize_settings' )
+	dbDelta(
+		"CREATE TABLE $entries (
+			id bigint(20) unsigned NOT NULL auto_increment,
+			form_id int(10) unsigned NOT NULL default 0,
+			form_name varchar(120) NOT NULL default '',
+			form_data longtext NOT NULL,
+			ip_address varchar(45) NOT NULL default '',
+			submitted_at datetime NOT NULL,
+			PRIMARY KEY  (id),
+			KEY form_id (form_id),
+			KEY submitted_at (submitted_at)
+		) $charset;"
 	);
-}
 
-function aqm_cf_sanitize_settings( $input ) {
-	$defaults = aqm_cf_default_settings();
-	$input    = (array) $input;
-	$out      = array();
-
-	$email = sanitize_email( $input['notify_email'] ?? '' );
-	if ( ! is_email( $email ) ) {
-		$email = get_option( 'admin_email' );
-		add_settings_error( 'aqm_cf_settings', 'notify_email', __( 'The notification email was not valid — falling back to the site admin address.', 'aqm-contact-form' ) );
-	}
-	$out['notify_email'] = $email;
-
-	// CC: comma-separated list, invalid entries dropped.
-	$cc = array();
-	foreach ( array_filter( array_map( 'trim', explode( ',', (string) ( $input['notify_cc'] ?? '' ) ) ) ) as $candidate ) {
-		$candidate = sanitize_email( $candidate );
-		if ( is_email( $candidate ) ) {
-			$cc[] = $candidate;
-		}
-	}
-	$out['notify_cc'] = implode( ', ', $cc );
-
-	$out['autoreply']         = empty( $input['autoreply'] ) ? 0 : 1;
-	$out['autoreply_subject'] = sanitize_text_field( $input['autoreply_subject'] ?? $defaults['autoreply_subject'] );
-	$out['autoreply_body']    = sanitize_textarea_field( $input['autoreply_body'] ?? $defaults['autoreply_body'] );
-	$out['success_message']   = sanitize_text_field( $input['success_message'] ?? $defaults['success_message'] );
-
-	$label               = sanitize_text_field( $input['field_label'] ?? '' );
-	$out['field_label']  = '' === $label ? $defaults['field_label'] : $label;
-
-	$out['consent_enabled'] = empty( $input['consent_enabled'] ) ? 0 : 1;
-	$out['consent_text']    = sanitize_text_field( $input['consent_text'] ?? $defaults['consent_text'] );
-
-	$out['spam_protection'] = empty( $input['spam_protection'] ) ? 0 : 1;
-	$out['rate_limit']      = max( 0, min( 100, (int) ( $input['rate_limit'] ?? $defaults['rate_limit'] ) ) );
-	$out['max_links']       = max( 0, min( 50, (int) ( $input['max_links'] ?? $defaults['max_links'] ) ) );
-
-	$proxy                  = (string) ( $input['proxy_header'] ?? '' );
-	$out['proxy_header']    = array_key_exists( $proxy, aqm_cf_proxy_headers() ) ? $proxy : '';
-
-	$out['store_ip']            = empty( $input['store_ip'] ) ? 0 : 1;
-	$out['anonymise_ip']        = empty( $input['anonymise_ip'] ) ? 0 : 1;
-	$out['delete_on_uninstall'] = empty( $input['delete_on_uninstall'] ) ? 0 : 1;
-
-	return $out;
-}
-
-/* ═══════════════════════════════════════════════════════════════════════
-   3. HELPERS
-   ═══════════════════════════════════════════════════════════════════════ */
-
-function aqm_cf_flush_event_type_cache() {
-	wp_cache_delete( 'aqm_cf_event_types', 'aqm_cf' );
-}
-
-/**
- * @return array Objects with id, label, sort_order.
- */
-function aqm_cf_get_event_types() {
-	$cached = wp_cache_get( 'aqm_cf_event_types', 'aqm_cf' );
-	if ( is_array( $cached ) ) {
-		return $cached;
+	// Seed only on a genuinely fresh install. add_option() relies on the
+	// unique index on option_name, so concurrent requests cannot double-seed.
+	$count = (int) $wpdb->get_var( "SELECT COUNT(*) FROM $forms" ); // phpcs:ignore
+	if ( 0 === $count && add_option( 'aqm_seeded', 1, '', 'no' ) ) {
+		aqm_seed_default_form();
 	}
 
+	update_option( 'aqm_db_version', AQM_DB_VERSION );
+}
+
+/* ══════════════════════════════════════════════════════════════
+   2. SEED
+   ══════════════════════════════════════════════════════════════ */
+
+function aqm_default_autoreply_body() {
+	return "Dear {name},\n\nThank you for getting in touch. We have received your message and will reply shortly.\n\nFor your records, here is what you sent:\n\n{submission}\n\nWarm regards,\n{site_name}";
+}
+
+function aqm_seed_default_form( $form_name = 'General Contact Form' ) {
 	global $wpdb;
-	$table = aqm_cf_event_types_table();
-	$rows  = $wpdb->get_results( // phpcs:ignore WordPress.DB.PreparedSQL, WordPress.DB.DirectDatabaseQuery
-		"SELECT id, label, sort_order FROM $table ORDER BY sort_order ASC, label ASC"
-	);
-	$rows = is_array( $rows ) ? $rows : array();
 
-	wp_cache_set( 'aqm_cf_event_types', $rows, 'aqm_cf', HOUR_IN_SECONDS );
-	return $rows;
+	$wpdb->insert(
+		aqm_table( 'forms' ),
+		array(
+			'form_name'         => $form_name,
+			'notify_email'      => get_option( 'admin_email' ),
+			'email_subject'     => 'New Contact Form Submission',
+			'captcha_enabled'   => 1,
+			'spam_protection'   => 1,
+			'autoreply_enabled' => 0,
+			'autoreply_subject' => 'We received your message',
+			'autoreply_body'    => aqm_default_autoreply_body(),
+			'success_message'   => 'Thank you{comma_name}! Your message has been received. We will be in touch soon.',
+			'store_ip'          => 1,
+			'created_at'        => current_time( 'mysql' ),
+		),
+		array( '%s', '%s', '%s', '%d', '%d', '%d', '%s', '%s', '%s', '%d', '%s' )
+	);
+
+	$form_id = (int) $wpdb->insert_id;
+	aqm_seed_default_fields( $form_id );
+
+	return $form_id;
 }
 
-function aqm_cf_get_event_type( $id ) {
-	foreach ( aqm_cf_get_event_types() as $type ) {
-		if ( (int) $type->id === (int) $id ) {
-			return $type;
+function aqm_seed_default_fields( $form_id ) {
+	global $wpdb;
+
+	$fields = array(
+		array( 'name', 'Full Name', 'text', 'Your full name', 1, 1, 1 ),
+		array( 'email', 'Email Address', 'email', 'your@email.com', 1, 1, 2 ),
+		array( 'phone', 'Telephone', 'tel', '(905) 555-0100', 0, 1, 3 ),
+		array( 'event_type', 'Type of Event', 'combobox', '', 1, 1, 4 ),
+		array( 'message', 'Message', 'textarea', 'Describe your inquiry...', 1, 1, 5 ),
+	);
+
+	foreach ( $fields as $f ) {
+		$wpdb->insert(
+			aqm_table( 'form_fields' ),
+			array(
+				'form_id'     => $form_id,
+				'field_key'   => aqm_unique_key( $f[0], $form_id ),
+				'label'       => $f[1],
+				'field_type'  => $f[2],
+				'placeholder' => $f[3],
+				'required'    => $f[4],
+				'enabled'     => $f[5],
+				'sort_order'  => $f[6],
+			),
+			array( '%d', '%s', '%s', '%s', '%s', '%d', '%d', '%d' )
+		);
+
+		if ( in_array( $f[2], array( 'select', 'combobox' ), true ) ) {
+			$field_db_id = (int) $wpdb->insert_id;
+			$opts        = array(
+				'General Enquiry',
+				'Event Booking',
+				'Request a Quote',
+				'Wedding or Private Celebration',
+				'Corporate or Business Event',
+				'Conference or Seminar',
+				'Workshop or Training',
+				'Fundraiser or Charity Event',
+				'Speaker or Presentation Request',
+				'Media or Press Enquiry',
+				'Partnership or Sponsorship',
+				'Other',
+			);
+			foreach ( $opts as $i => $opt ) {
+				$wpdb->insert(
+					aqm_table( 'field_options' ),
+					array(
+						'field_id'   => $field_db_id,
+						'label'      => $opt,
+						'sort_order' => $i + 1,
+					),
+					array( '%d', '%s', '%d' )
+				);
+			}
 		}
 	}
-	return null;
 }
 
-/**
- * The proxy headers an administrator may choose to trust.
- *
- * @return array header key => human label
- */
-function aqm_cf_proxy_headers() {
+/* ══════════════════════════════════════════════════════════════
+   3. HELPERS
+   ══════════════════════════════════════════════════════════════ */
+
+function aqm_unique_key( $base, $form_id ) {
+	global $wpdb;
+
+	$key = preg_replace( '/_+/', '_', trim( preg_replace( '/[^a-z0-9_]/', '_', strtolower( $base ) ), '_' ) );
+	if ( '' === $key ) {
+		$key = 'field';
+	}
+
+	$table = aqm_table( 'form_fields' );
+	$orig  = $key;
+	$n     = 1;
+
+	while ( $wpdb->get_var( $wpdb->prepare( "SELECT id FROM $table WHERE field_key = %s AND form_id = %d", $key, $form_id ) ) ) { // phpcs:ignore
+		$key = $orig . '_' . $n++;
+	}
+
+	return $key;
+}
+
+function aqm_get_forms() {
+	global $wpdb;
+	$table = aqm_table( 'forms' );
+	return $wpdb->get_results( "SELECT * FROM $table ORDER BY id ASC" ); // phpcs:ignore
+}
+
+function aqm_get_form( $form_id ) {
+	global $wpdb;
+	$table = aqm_table( 'forms' );
+	return $wpdb->get_row( $wpdb->prepare( "SELECT * FROM $table WHERE id = %d", $form_id ) ); // phpcs:ignore
+}
+
+function aqm_get_fields( $form_id, $enabled_only = false ) {
+	global $wpdb;
+	$table = aqm_table( 'form_fields' );
+
+	if ( $enabled_only ) {
+		return $wpdb->get_results( $wpdb->prepare( "SELECT * FROM $table WHERE form_id = %d AND enabled = 1 ORDER BY sort_order ASC, id ASC", $form_id ) ); // phpcs:ignore
+	}
+	return $wpdb->get_results( $wpdb->prepare( "SELECT * FROM $table WHERE form_id = %d ORDER BY sort_order ASC, id ASC", $form_id ) ); // phpcs:ignore
+}
+
+function aqm_get_options( $field_id ) {
+	global $wpdb;
+	$table = aqm_table( 'field_options' );
+	return $wpdb->get_results( $wpdb->prepare( "SELECT * FROM $table WHERE field_id = %d ORDER BY sort_order ASC, id ASC", $field_id ) ); // phpcs:ignore
+}
+
+function aqm_validate_email( $email ) {
+	$email = trim( $email );
+	if ( ! filter_var( $email, FILTER_VALIDATE_EMAIL ) ) {
+		return false;
+	}
+	$parts  = explode( '@', $email, 2 );
+	$domain = $parts[1] ?? '';
+	if ( false === strpos( $domain, '.' ) ) {
+		return false;
+	}
+	if ( false !== strpos( $email, '..' ) ) {
+		return false;
+	}
+	foreach ( array( '.invalid', '.test', '.example', '.localhost' ) as $tld ) {
+		if ( substr( strtolower( $domain ), -strlen( $tld ) ) === $tld ) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/* ---- CAPTCHA: signed, stateless, no session. Kept from 7.0.0 ---- */
+
+function aqm_captcha_secret() {
+	return hash( 'sha256', wp_salt( 'auth' ) . 'aqm_captcha_v6' );
+}
+
+function aqm_captcha_fields( $form_id ) {
+	$a   = wp_rand( 2, 9 );
+	$b   = wp_rand( 1, 9 );
+	$ans = $a + $b;
+	$ts  = time();
+
 	return array(
-		''                       => __( 'None — the server sees visitors directly', 'aqm-contact-form' ),
-		'HTTP_CF_CONNECTING_IP'  => __( 'Cloudflare', 'aqm-contact-form' ),
-		'HTTP_X_FORWARDED_FOR'   => __( 'Standard proxy / load balancer (X-Forwarded-For)', 'aqm-contact-form' ),
-		'HTTP_X_REAL_IP'         => __( 'Nginx proxy (X-Real-IP)', 'aqm-contact-form' ),
-		'HTTP_TRUE_CLIENT_IP'    => __( 'Akamai / Cloudflare Enterprise (True-Client-IP)', 'aqm-contact-form' ),
+		'question' => "What is $a + $b ?",
+		'token'    => hash_hmac( 'sha256', $ans . '|' . $ts . '|' . $form_id, aqm_captcha_secret() ),
+		'ts'       => $ts,
 	);
 }
 
-/**
- * Client IP. Proxies are NOT trusted unless the administrator selects one on
- * the settings screen — otherwise anyone could spoof X-Forwarded-For and walk
- * straight past the rate limiter.
- */
-function aqm_cf_get_client_ip() {
+function aqm_verify_captcha( $answer, $form_id, $token, $ts ) {
+	$ts = (int) $ts;
+	if ( abs( time() - $ts ) > 1800 ) {
+		return false;
+	}
+	$expected = hash_hmac( 'sha256', (int) $answer . '|' . $ts . '|' . $form_id, aqm_captcha_secret() );
+	return hash_equals( $expected, (string) $token );
+}
+
+/* ---- Signed timestamp, for the silent timing trap ---- */
+
+function aqm_timestamp_token() {
+	$now = time();
+	return $now . '.' . wp_hash( 'aqm_ts_' . $now );
+}
+
+function aqm_timestamp_age( $token ) {
+	$parts = explode( '.', (string) $token, 2 );
+	if ( 2 !== count( $parts ) ) {
+		return false;
+	}
+	$time = (int) $parts[0];
+	if ( ! hash_equals( wp_hash( 'aqm_ts_' . $time ), $parts[1] ) ) {
+		return false;
+	}
+	return time() - $time;
+}
+
+/* ---- Client IP and rate limiting ---- */
+
+function aqm_proxy_headers() {
+	return array(
+		''                      => 'None - the server sees visitors directly',
+		'HTTP_CF_CONNECTING_IP' => 'Cloudflare',
+		'HTTP_X_FORWARDED_FOR'  => 'Standard proxy / load balancer (X-Forwarded-For)',
+		'HTTP_X_REAL_IP'        => 'Nginx proxy (X-Real-IP)',
+		'HTTP_TRUE_CLIENT_IP'   => 'Akamai / Cloudflare Enterprise (True-Client-IP)',
+	);
+}
+
+function aqm_get_client_ip() {
 	$ip     = $_SERVER['REMOTE_ADDR'] ?? '';
-	$header = (string) aqm_cf_setting( 'proxy_header' );
-	$header = apply_filters( 'aqm_cf_trusted_proxy_header', $header );
+	$header = (string) get_option( 'aqm_proxy_header', '' );
+	$header = apply_filters( 'aqm_trusted_proxy_header', $header );
 
 	if ( $header && ! empty( $_SERVER[ $header ] ) ) {
 		$parts = explode( ',', sanitize_text_field( wp_unslash( $_SERVER[ $header ] ) ) );
@@ -333,307 +370,43 @@ function aqm_cf_get_client_ip() {
 	return $ip ? $ip : '';
 }
 
-function aqm_cf_anonymise_ip( $ip ) {
-	if ( ! $ip ) {
-		return '';
-	}
-	if ( false !== strpos( $ip, ':' ) ) {
-		$parts = explode( ':', $ip );
-		return implode( ':', array_slice( $parts, 0, 4 ) ) . '::';
-	}
-	$parts = explode( '.', $ip );
-	if ( 4 === count( $parts ) ) {
-		$parts[3] = '0';
-		return implode( '.', $parts );
-	}
-	return $ip;
+function aqm_rate_limit_key() {
+	$ip = aqm_get_client_ip();
+	// No usable IP means no rate limiting, rather than throwing every
+	// anonymous visitor into one shared bucket and throttling them together.
+	return $ip ? 'aqm_rl_' . md5( $ip ) : '';
 }
 
-/**
- * Signed timestamp so the time-trap cannot be forged or replayed forever.
- */
-function aqm_cf_timestamp_token() {
-	$now = time();
-	return $now . '.' . wp_hash( 'aqm_cf_ts_' . $now );
-}
-
-function aqm_cf_timestamp_age( $token ) {
-	$parts = explode( '.', (string) $token, 2 );
-	if ( 2 !== count( $parts ) ) {
-		return false;
-	}
-	$time = (int) $parts[0];
-	if ( ! hash_equals( wp_hash( 'aqm_cf_ts_' . $time ), $parts[1] ) ) {
-		return false;
-	}
-	return time() - $time;
-}
-
-/**
- * @return string Empty when the visitor's IP is unknown — in that case we do
- *                not rate limit at all, rather than dropping every anonymous
- *                visitor into one shared bucket and throttling them together.
- */
-function aqm_cf_rate_limit_key() {
-	$ip = aqm_cf_get_client_ip();
-	return $ip ? 'aqm_cf_rl_' . md5( $ip ) : '';
-}
-
-function aqm_cf_rate_limit_exceeded() {
-	$limit = (int) aqm_cf_setting( 'rate_limit' );
-	$key   = aqm_cf_rate_limit_key();
+function aqm_rate_limit_exceeded() {
+	$limit = (int) get_option( 'aqm_rate_limit', 5 );
+	$key   = aqm_rate_limit_key();
 	if ( $limit < 1 || '' === $key ) {
 		return false;
 	}
 	return (int) get_transient( $key ) >= $limit;
 }
 
-function aqm_cf_record_submission() {
-	$key = aqm_cf_rate_limit_key();
+function aqm_record_submission() {
+	$key = aqm_rate_limit_key();
 	if ( '' === $key ) {
 		return;
 	}
 	set_transient( $key, (int) get_transient( $key ) + 1, HOUR_IN_SECONDS );
 }
 
-function aqm_cf_count_links( $text ) {
-	return preg_match_all( '#\b(?:https?://|www\.)\S+#i', $text );
-}
+/* ---- Flash messages, for Post/Redirect/Get ---- */
 
 /**
- * Replace {placeholders} in message templates.
+ * Current front-end URL.
+ *
+ * wp_get_referer() cannot be used: it deliberately returns false when the
+ * referer matches the request URI, which is exactly the case for a form
+ * posting back to its own page.
  */
-function aqm_cf_render_template( $template, array $vars ) {
-	$keys = array_map(
-		static function ( $key ) {
-			return '{' . $key . '}';
-		},
-		array_keys( $vars )
-	);
-	return str_replace( $keys, array_values( $vars ), $template );
-}
+function aqm_current_url() {
+	$host = isset( $_SERVER['HTTP_HOST'] ) ? sanitize_text_field( wp_unslash( $_SERVER['HTTP_HOST'] ) ) : '';
+	$uri  = isset( $_SERVER['REQUEST_URI'] ) ? esc_url_raw( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '/';
 
-/* ═══════════════════════════════════════════════════════════════════════
-   4. FRONT-END SUBMISSION — handled on template_redirect so we can
-      Post/Redirect/Get (no duplicate entries on browser refresh).
-   ═══════════════════════════════════════════════════════════════════════ */
-
-add_action( 'template_redirect', 'aqm_cf_handle_submission' );
-
-function aqm_cf_handle_submission() {
-	if ( empty( $_POST['aqm_cf_submit'] ) ) {
-		return;
-	}
-
-	$values = array(
-		'name'       => isset( $_POST['aqm_name'] ) ? sanitize_text_field( wp_unslash( $_POST['aqm_name'] ) ) : '',
-		'email'      => isset( $_POST['aqm_email'] ) ? sanitize_email( wp_unslash( $_POST['aqm_email'] ) ) : '',
-		'phone'      => isset( $_POST['aqm_phone'] ) ? sanitize_text_field( wp_unslash( $_POST['aqm_phone'] ) ) : '',
-		'event_type' => isset( $_POST['aqm_event_type'] ) ? (int) $_POST['aqm_event_type'] : 0,
-		'message'    => isset( $_POST['aqm_message'] ) ? sanitize_textarea_field( wp_unslash( $_POST['aqm_message'] ) ) : '',
-		'consent'    => empty( $_POST['aqm_consent'] ) ? 0 : 1,
-	);
-
-	$errors  = array();
-	$general = '';
-
-	/* ---- Nonce. A cached page can serve an expired nonce, so fail kindly. ---- */
-	$nonce = isset( $_POST['aqm_nonce'] ) ? sanitize_text_field( wp_unslash( $_POST['aqm_nonce'] ) ) : '';
-	if ( ! wp_verify_nonce( $nonce, 'aqm_contact_submit' ) ) {
-		aqm_cf_flash_and_redirect(
-			array(
-				'status'  => 'error',
-				'general' => __( 'Your session expired before the form was sent. Your details are still below — please press “Send Message” once more.', 'aqm-contact-form' ),
-				'values'  => $values,
-			)
-		);
-	}
-
-	/* ---- Spam traps. ---- */
-	if ( aqm_cf_setting( 'spam_protection' ) ) {
-		$honeypot = isset( $_POST['aqm_website'] ) ? trim( (string) wp_unslash( $_POST['aqm_website'] ) ) : '';
-		$age      = aqm_cf_timestamp_age( isset( $_POST['aqm_ts'] ) ? wp_unslash( $_POST['aqm_ts'] ) : '' );
-
-		// Only these two are certain enough to discard silently: a filled
-		// honeypot, or a missing/forged timestamp, neither of which a real
-		// browser produces. Bots are shown "success" so they do not adapt.
-		if ( '' !== $honeypot || false === $age || $age < 3 ) {
-			aqm_cf_flash_and_redirect(
-				array(
-					'status'  => 'success',
-					'general' => aqm_cf_success_text( $values['name'] ),
-				)
-			);
-		}
-
-		// A stale timestamp means a page that sat open (or was served from a
-		// cache), NOT a bot. Discarding it silently would lose real enquiries,
-		// so ask the visitor to send again instead.
-		if ( $age > DAY_IN_SECONDS ) {
-			aqm_cf_flash_and_redirect(
-				array(
-					'status'  => 'error',
-					'general' => __( 'This page had been open for a while. Your details are still below — please press “Send Message” once more.', 'aqm-contact-form' ),
-					'values'  => $values,
-				)
-			);
-		}
-
-		// Too many links is a strong spam signal but a plausible mistake, so
-		// it is a visible validation error rather than a silent discard.
-		$max_links = (int) aqm_cf_setting( 'max_links' );
-		if ( $max_links > 0 && aqm_cf_count_links( $values['message'] ) > $max_links ) {
-			aqm_cf_flash_and_redirect(
-				array(
-					'status'  => 'error',
-					'general' => __( 'Please correct the highlighted fields and send the form again.', 'aqm-contact-form' ),
-					'errors'  => array(
-						'message' => sprintf(
-							/* translators: %d: maximum number of links */
-							__( 'Please include no more than %d web links. If you need to send more, write to us directly instead.', 'aqm-contact-form' ),
-							$max_links
-						),
-					),
-					'values'  => $values,
-				)
-			);
-		}
-	}
-
-	if ( aqm_cf_rate_limit_exceeded() ) {
-		aqm_cf_flash_and_redirect(
-			array(
-				'status'  => 'error',
-				'general' => __( 'You have sent several messages already. Please wait an hour before sending another, or telephone us directly.', 'aqm-contact-form' ),
-				'values'  => $values,
-			)
-		);
-	}
-
-	/* ---- Validation, field by field. ---- */
-	if ( '' === $values['name'] ) {
-		$errors['name'] = __( 'Please tell us your name.', 'aqm-contact-form' );
-	} elseif ( mb_strlen( $values['name'] ) > 120 ) {
-		$errors['name'] = __( 'Please keep your name under 120 characters.', 'aqm-contact-form' );
-	}
-
-	if ( '' === $values['email'] ) {
-		$errors['email'] = __( 'Please enter your email address.', 'aqm-contact-form' );
-	} elseif ( ! is_email( $values['email'] ) ) {
-		$errors['email'] = __( 'That email address does not look right — please check it.', 'aqm-contact-form' );
-	} elseif ( mb_strlen( $values['email'] ) > 120 ) {
-		$errors['email'] = __( 'Please use an email address under 120 characters.', 'aqm-contact-form' );
-	}
-
-	if ( '' !== $values['phone'] && ! preg_match( '/^[0-9+()\.\-\s]{6,30}$/', $values['phone'] ) ) {
-		$errors['phone'] = __( 'Please enter a telephone number using digits, spaces and ( ) + - only.', 'aqm-contact-form' );
-	}
-
-	$event = aqm_cf_get_event_type( $values['event_type'] );
-	if ( ! $event ) {
-		$errors['event_type'] = __( 'Please choose an option from the list.', 'aqm-contact-form' );
-	}
-
-	if ( '' === $values['message'] ) {
-		$errors['message'] = __( 'Please write a short message so we know how to help.', 'aqm-contact-form' );
-	} elseif ( mb_strlen( $values['message'] ) > 5000 ) {
-		$errors['message'] = __( 'Your message is longer than 5,000 characters. Please shorten it a little.', 'aqm-contact-form' );
-	}
-
-	if ( aqm_cf_setting( 'consent_enabled' ) && ! $values['consent'] ) {
-		$errors['consent'] = __( 'Please tick the box to confirm we may store your details.', 'aqm-contact-form' );
-	}
-
-	if ( $errors ) {
-		aqm_cf_flash_and_redirect(
-			array(
-				'status'  => 'error',
-				'general' => __( 'Please correct the highlighted fields and send the form again.', 'aqm-contact-form' ),
-				'errors'  => $errors,
-				'values'  => $values,
-			)
-		);
-	}
-
-	/* ---- Store. ---- */
-	global $wpdb;
-
-	$ip = '';
-	if ( aqm_cf_setting( 'store_ip' ) ) {
-		$ip = aqm_cf_get_client_ip();
-		if ( aqm_cf_setting( 'anonymise_ip' ) ) {
-			$ip = aqm_cf_anonymise_ip( $ip );
-		}
-	}
-
-	$inserted = $wpdb->insert(
-		aqm_cf_entries_table(),
-		array(
-			'name'          => $values['name'],
-			'email'         => $values['email'],
-			'phone'         => $values['phone'],
-			'event_type_id' => (int) $event->id,
-			'event_type'    => $event->label,
-			'message'       => $values['message'],
-			'consent'       => $values['consent'],
-			'ip_address'    => $ip,
-			'user_agent'    => isset( $_SERVER['HTTP_USER_AGENT'] ) ? substr( sanitize_text_field( wp_unslash( $_SERVER['HTTP_USER_AGENT'] ) ), 0, 255 ) : '',
-			'submitted_at'  => current_time( 'mysql' ),
-		),
-		array( '%s', '%s', '%s', '%d', '%s', '%s', '%d', '%s', '%s', '%s' )
-	);
-
-	if ( false === $inserted ) {
-		error_log( 'AQM Contact Form: failed to store entry — ' . $wpdb->last_error );
-		aqm_cf_flash_and_redirect(
-			array(
-				'status'  => 'error',
-				'general' => __( 'Something went wrong while saving your message. Please try again, or email us directly.', 'aqm-contact-form' ),
-				'values'  => $values,
-			)
-		);
-	}
-
-	$entry_id = (int) $wpdb->insert_id;
-	aqm_cf_record_submission();
-
-	/* ---- Notify. ---- */
-	aqm_cf_send_notification( $entry_id, $values, $event->label );
-
-	if ( aqm_cf_setting( 'autoreply' ) ) {
-		aqm_cf_send_autoreply( $values, $event->label );
-	}
-
-	do_action( 'aqm_cf_entry_saved', $entry_id, $values, $event );
-
-	aqm_cf_flash_and_redirect(
-		array(
-			'status'  => 'success',
-			'general' => aqm_cf_success_text( $values['name'] ),
-		)
-	);
-}
-
-function aqm_cf_success_text( $name ) {
-	return aqm_cf_render_template(
-		(string) aqm_cf_setting( 'success_message' ),
-		array( 'name' => $name )
-	);
-}
-
-/**
- * Current front-end URL. Note that wp_get_referer() cannot be used here: it
- * deliberately returns false when the referer matches the request URI, which
- * is exactly the case for a form that posts back to its own page.
- */
-function aqm_cf_current_url() {
-	$host = isset( $_SERVER['HTTP_HOST'] )
-		? sanitize_text_field( wp_unslash( $_SERVER['HTTP_HOST'] ) )
-		: (string) wp_parse_url( home_url(), PHP_URL_HOST );
-	$uri = isset( $_SERVER['REQUEST_URI'] ) ? esc_url_raw( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '/';
-
-	// Never trust a Host header we do not recognise. Compare with the port and
-	// any "www." prefix removed so alias/www variants still redirect correctly.
 	$normalise = static function ( $value ) {
 		$value = strtolower( (string) $value );
 		$value = preg_replace( '/:\d+$/', '', $value );
@@ -648,7 +421,7 @@ function aqm_cf_current_url() {
 		)
 	);
 
-	if ( ! in_array( $normalise( $host ), $known, true ) ) {
+	if ( ! $host || ! in_array( $normalise( $host ), $known, true ) ) {
 		return home_url( '/' );
 	}
 
@@ -656,161 +429,414 @@ function aqm_cf_current_url() {
 }
 
 /**
- * Store the outcome in a short-lived transient and redirect (PRG).
- * Never returns.
+ * Store the outcome and redirect. Never returns.
  */
-function aqm_cf_flash_and_redirect( array $payload ) {
-	// Lowercase hex only: the token is read back through sanitize_key(), which
-	// lowercases, so a mixed-case token would never match its transient.
+function aqm_flash_and_redirect( array $payload ) {
+	// Lowercase hex only: the token is read back through sanitize_key(),
+	// which lowercases, so a mixed-case token would never match.
 	$token = bin2hex( wp_generate_password( 10, false, false ) );
-	set_transient( 'aqm_cf_flash_' . $token, $payload, 5 * MINUTE_IN_SECONDS );
+	set_transient( 'aqm_flash_' . $token, $payload, 5 * MINUTE_IN_SECONDS );
 
-	$redirect = remove_query_arg( 'aqm_cf', aqm_cf_current_url() );
-	$redirect = add_query_arg( 'aqm_cf', $token, $redirect );
+	$url    = remove_query_arg( 'aqm_sent', aqm_current_url() );
+	$url    = add_query_arg( 'aqm_sent', $token, $url );
+	$anchor = isset( $payload['form_id'] ) ? '#aqm-form-' . (int) $payload['form_id'] : '';
 
-	wp_safe_redirect( $redirect . '#aqm-contact-form' );
+	wp_safe_redirect( $url . $anchor );
 	exit;
 }
 
-function aqm_cf_get_flash() {
+function aqm_get_flash() {
 	static $flash = null;
 	if ( null !== $flash ) {
 		return $flash;
 	}
 
 	$flash = array();
-	if ( ! empty( $_GET['aqm_cf'] ) ) {
-		$token   = sanitize_key( wp_unslash( $_GET['aqm_cf'] ) );
-		$payload = get_transient( 'aqm_cf_flash_' . $token );
+	if ( ! empty( $_GET['aqm_sent'] ) ) {
+		$token   = sanitize_key( wp_unslash( $_GET['aqm_sent'] ) );
+		$payload = get_transient( 'aqm_flash_' . $token );
 		if ( is_array( $payload ) ) {
 			$flash = $payload;
-			delete_transient( 'aqm_cf_flash_' . $token );
+			delete_transient( 'aqm_flash_' . $token );
 		}
 	}
 	return $flash;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════
-   5. EMAIL
-   ═══════════════════════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════════════
+   4. FRONT-END SUBMISSION
 
-function aqm_cf_mail_from_address() {
-	$host = wp_parse_url( home_url(), PHP_URL_HOST );
-	$host = preg_replace( '/^www\./i', '', (string) $host );
-	return apply_filters( 'aqm_cf_from_address', 'no-reply@' . $host );
+   Handled on template_redirect, before any output, so we can
+   redirect afterwards. v7.0.0 processed inside the shortcode,
+   which meant a browser refresh re-filed the whole submission.
+   ══════════════════════════════════════════════════════════════ */
+
+add_action( 'template_redirect', 'aqm_handle_submission' );
+
+function aqm_handle_submission() {
+	if ( empty( $_POST['aqm_form_id'] ) ) {
+		return;
+	}
+
+	global $wpdb;
+
+	$form_id = (int) $_POST['aqm_form_id'];
+	$form    = aqm_get_form( $form_id );
+	if ( ! $form ) {
+		return;
+	}
+
+	$fields = aqm_get_fields( $form_id, true );
+
+	/* ---- Collect, unslashing first ----------------------------------
+	   WordPress adds slashes to every superglobal. Without wp_unslash()
+	   a visitor called O'Brien is stored as O\'Brien.                  */
+	$values = array();
+	foreach ( $fields as $f ) {
+		$name = 'aqm_f' . $form_id . '_' . $f->field_key;
+		$raw  = isset( $_POST[ $name ] ) ? wp_unslash( $_POST[ $name ] ) : '';
+
+		if ( 'textarea' === $f->field_type ) {
+			$values[ $f->field_key ] = sanitize_textarea_field( $raw );
+		} elseif ( 'email' === $f->field_type ) {
+			$values[ $f->field_key ] = sanitize_email( $raw );
+		} else {
+			$values[ $f->field_key ] = sanitize_text_field( $raw );
+		}
+	}
+
+	$errors = array();
+
+	/* ---- Nonce ---- */
+	$nonce = isset( $_POST[ 'aqm_nonce_' . $form_id ] ) ? sanitize_text_field( wp_unslash( $_POST[ 'aqm_nonce_' . $form_id ] ) ) : '';
+	if ( ! wp_verify_nonce( $nonce, 'aqm_submit_form_' . $form_id ) ) {
+		aqm_flash_and_redirect(
+			array(
+				'form_id' => $form_id,
+				'status'  => 'error',
+				'general' => 'Your session expired before the form was sent. Your details are still below - please press Send Message once more.',
+				'values'  => $values,
+			)
+		);
+	}
+
+	/* ---- Silent spam traps ---- */
+	if ( $form->spam_protection ) {
+		$honeypot = isset( $_POST['aqm_website'] ) ? trim( (string) wp_unslash( $_POST['aqm_website'] ) ) : '';
+		$age      = aqm_timestamp_age( isset( $_POST['aqm_ts'] ) ? wp_unslash( $_POST['aqm_ts'] ) : '' );
+
+		// Only a filled honeypot or a missing/forged timestamp is certain
+		// enough to discard silently. Bots see "success" so they do not adapt.
+		if ( '' !== $honeypot || false === $age || $age < 3 ) {
+			aqm_flash_and_redirect(
+				array(
+					'form_id' => $form_id,
+					'status'  => 'success',
+					'general' => aqm_success_text( $form, $values ),
+				)
+			);
+		}
+
+		// A stale page is not a bot - ask rather than discard.
+		if ( $age > DAY_IN_SECONDS ) {
+			aqm_flash_and_redirect(
+				array(
+					'form_id' => $form_id,
+					'status'  => 'error',
+					'general' => 'This page had been open for a while. Your details are still below - please press Send Message once more.',
+					'values'  => $values,
+				)
+			);
+		}
+	}
+
+	if ( aqm_rate_limit_exceeded() ) {
+		aqm_flash_and_redirect(
+			array(
+				'form_id' => $form_id,
+				'status'  => 'error',
+				'general' => 'You have sent several messages already. Please wait an hour before sending another, or telephone us directly.',
+				'values'  => $values,
+			)
+		);
+	}
+
+	/* ---- CAPTCHA ---- */
+	if ( $form->captcha_enabled ) {
+		$answer = isset( $_POST[ 'aqm_captcha_' . $form_id ] ) ? trim( (string) wp_unslash( $_POST[ 'aqm_captcha_' . $form_id ] ) ) : '';
+		$token  = isset( $_POST[ 'aqm_captcha_token_' . $form_id ] ) ? sanitize_text_field( wp_unslash( $_POST[ 'aqm_captcha_token_' . $form_id ] ) ) : '';
+		$ts     = isset( $_POST[ 'aqm_captcha_ts_' . $form_id ] ) ? sanitize_text_field( wp_unslash( $_POST[ 'aqm_captcha_ts_' . $form_id ] ) ) : '';
+
+		if ( ! aqm_verify_captcha( $answer, $form_id, $token, $ts ) ) {
+			$errors['__captcha'] = 'That answer was not correct. Please try the sum again.';
+		}
+	}
+
+	/* ---- Per-field validation ----------------------------------------
+	   v7.0.0 stopped at the first problem and showed one generic message.
+	   Every field is now checked, and each reports its own error.      */
+	$stored = array();
+
+	foreach ( $fields as $f ) {
+		$key = $f->field_key;
+		$val = $values[ $key ];
+
+		if ( $f->required && '' === trim( (string) $val ) ) {
+			$errors[ $key ] = 'Please complete "' . $f->label . '".';
+			continue;
+		}
+
+		if ( 'email' === $f->field_type && '' !== trim( (string) $val ) && ! aqm_validate_email( $val ) ) {
+			$errors[ $key ] = 'That email address does not look right - please check it.';
+			continue;
+		}
+
+		if ( 'url' === $f->field_type && '' !== trim( (string) $val ) ) {
+			$val = esc_url_raw( $val );
+			if ( '' === $val ) {
+				$errors[ $key ] = 'Please enter a valid web address, starting with http:// or https://';
+				continue;
+			}
+		}
+
+		if ( 'number' === $f->field_type && '' !== trim( (string) $val ) && ! is_numeric( $val ) ) {
+			$errors[ $key ] = 'Please enter a number.';
+			continue;
+		}
+
+		// A dropdown submits an option ID; resolve it to its label so a
+		// tampered value cannot store arbitrary text.
+		if ( 'select' === $f->field_type && '' !== $val ) {
+			$table = aqm_table( 'field_options' );
+			$opt   = $wpdb->get_row( $wpdb->prepare( "SELECT label FROM $table WHERE id = %d AND field_id = %d", (int) $val, $f->id ) ); // phpcs:ignore
+			$val   = $opt ? $opt->label : '';
+			if ( '' === $val ) {
+				$errors[ $key ] = 'Please choose an option for "' . $f->label . '".';
+				continue;
+			}
+		}
+
+		if ( mb_strlen( (string) $val ) > 5000 ) {
+			$errors[ $key ] = 'That is longer than 5,000 characters. Please shorten it a little.';
+			continue;
+		}
+
+		$stored[ $key ] = $val;
+	}
+
+	if ( $errors ) {
+		aqm_flash_and_redirect(
+			array(
+				'form_id' => $form_id,
+				'status'  => 'error',
+				'general' => 'Please correct the highlighted fields and send the form again.',
+				'errors'  => $errors,
+				'values'  => $values,
+			)
+		);
+	}
+
+	/* ---- Store ---- */
+	$ip = $form->store_ip ? aqm_get_client_ip() : '';
+
+	$inserted = $wpdb->insert(
+		aqm_table( 'contact_entries' ),
+		array(
+			'form_id'      => $form_id,
+			'form_name'    => $form->form_name,
+			'form_data'    => wp_json_encode( $stored, JSON_UNESCAPED_UNICODE ),
+			'ip_address'   => $ip,
+			'submitted_at' => current_time( 'mysql' ),
+		),
+		array( '%d', '%s', '%s', '%s', '%s' )
+	);
+
+	if ( false === $inserted ) {
+		error_log( 'AQM Contact Form: failed to store entry - ' . $wpdb->last_error );
+		aqm_flash_and_redirect(
+			array(
+				'form_id' => $form_id,
+				'status'  => 'error',
+				'general' => 'Something went wrong while saving your message. Please try again, or email us directly.',
+				'values'  => $values,
+			)
+		);
+	}
+
+	$entry_id = (int) $wpdb->insert_id;
+	aqm_record_submission();
+
+	aqm_send_notification( $form, $fields, $stored, $entry_id );
+
+	if ( $form->autoreply_enabled ) {
+		aqm_send_autoreply( $form, $fields, $stored );
+	}
+
+	do_action( 'aqm_entry_saved', $entry_id, $form, $stored );
+
+	aqm_flash_and_redirect(
+		array(
+			'form_id' => $form_id,
+			'status'  => 'success',
+			'general' => aqm_success_text( $form, $stored ),
+		)
+	);
 }
 
-function aqm_cf_send_notification( $entry_id, array $values, $event_label ) {
-	$to = aqm_cf_setting( 'notify_email' );
+/**
+ * Best guess at the submitter's name, for greetings and Reply-To.
+ */
+function aqm_guess_name( array $data ) {
+	foreach ( array( 'name', 'full_name', 'your_name', 'first_name' ) as $key ) {
+		if ( ! empty( $data[ $key ] ) ) {
+			return trim( str_replace( array( '<', '>', '"' ), '', (string) $data[ $key ] ) );
+		}
+	}
+	return '';
+}
+
+function aqm_guess_email( array $data ) {
+	foreach ( $data as $key => $value ) {
+		if ( false !== strpos( $key, 'email' ) && is_email( (string) $value ) ) {
+			return (string) $value;
+		}
+	}
+	return '';
+}
+
+function aqm_success_text( $form, array $data ) {
+	$name     = aqm_guess_name( $data );
+	$template = $form->success_message ? $form->success_message : 'Thank you{comma_name}! Your message has been received. We will be in touch soon.';
+
+	return str_replace(
+		array( '{comma_name}', '{name}' ),
+		array( $name ? ', ' . $name : '', $name ),
+		$template
+	);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   5. EMAIL
+   ══════════════════════════════════════════════════════════════ */
+
+function aqm_mail_from_address() {
+	$host = wp_parse_url( home_url(), PHP_URL_HOST );
+	$host = preg_replace( '/^www\./i', '', (string) $host );
+	return apply_filters( 'aqm_from_address', 'no-reply@' . $host );
+}
+
+function aqm_format_submission( $fields, array $data ) {
+	$lines = array();
+	foreach ( $fields as $f ) {
+		$value   = $data[ $f->field_key ] ?? '';
+		$lines[] = $f->label . ': ' . ( '' === $value ? 'Not provided' : $value );
+	}
+	return implode( "\n", $lines );
+}
+
+function aqm_send_notification( $form, $fields, array $data, $entry_id ) {
+	$to = $form->notify_email ? $form->notify_email : get_option( 'admin_email' );
 	if ( ! is_email( $to ) ) {
 		return;
 	}
 
-	// sanitize_text_field already strips newlines, so header injection via the
-	// name is not possible; angle brackets are removed so Reply-To stays valid.
-	$safe_name = trim( str_replace( array( '<', '>', '"' ), '', $values['name'] ) );
-
-	$headers = array(
+	$site_name = wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES );
+	$headers   = array(
 		'Content-Type: text/plain; charset=UTF-8',
-		'From: ' . wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES ) . ' <' . aqm_cf_mail_from_address() . '>',
-		'Reply-To: ' . $safe_name . ' <' . $values['email'] . '>',
+		'From: ' . $site_name . ' <' . aqm_mail_from_address() . '>',
 	);
 
-	$cc = trim( (string) aqm_cf_setting( 'notify_cc' ) );
-	if ( $cc ) {
-		$headers[] = 'Cc: ' . $cc;
+	// sanitize_text_field already strips newlines, so header injection is not
+	// possible; angle brackets are removed so the header stays well formed.
+	$name  = aqm_guess_name( $data );
+	$email = aqm_guess_email( $data );
+	if ( $email ) {
+		$headers[] = 'Reply-To: ' . ( $name ? $name . ' <' . $email . '>' : $email );
 	}
 
-	$body = sprintf(
-		"New submission received.\n\nName: %s\nEmail: %s\nPhone: %s\nEvent Type: %s\n\nMessage:\n%s\n\nSubmitted: %s\nView in dashboard: %s\n",
-		$values['name'],
-		$values['email'],
-		$values['phone'] ? $values['phone'] : __( 'Not provided', 'aqm-contact-form' ),
-		$event_label,
-		$values['message'],
-		current_time( 'mysql' ),
-		admin_url( 'admin.php?page=aqm-contact-entries&action=view&id=' . $entry_id )
-	);
+	if ( ! empty( $form->notify_cc ) ) {
+		$headers[] = 'Cc: ' . $form->notify_cc;
+	}
 
-	$sent = wp_mail(
-		$to,
-		sprintf( /* translators: %s: event type */ __( 'New Contact Form Submission – %s', 'aqm-contact-form' ), $event_label ),
-		$body,
-		$headers
-	);
+	$body = 'Submission from: ' . $form->form_name . "\n\n"
+		. aqm_format_submission( $fields, $data )
+		. "\n\nSubmitted: " . current_time( 'mysql' )
+		. "\nView in dashboard: " . admin_url( 'admin.php?page=aqm-submissions&form_id=' . (int) $form->id ) . "\n";
 
-	// The entry is safely in the database either way, but a silently failing
-	// mailer is the single most common way enquiries get missed.
+	$subject = $form->email_subject ? $form->email_subject : 'New Contact Form Submission';
+	$sent    = wp_mail( $to, $subject, $body, $headers );
+
+	// The entry is safely stored either way, but a silently failing mailer
+	// is the commonest way enquiries get missed entirely.
 	if ( ! $sent ) {
 		error_log( 'AQM Contact Form: wp_mail() failed for entry #' . $entry_id );
-		set_transient( 'aqm_cf_mail_failure', (int) $entry_id, WEEK_IN_SECONDS );
+		set_transient( 'aqm_mail_failure', (int) $entry_id, WEEK_IN_SECONDS );
 	}
 }
 
-function aqm_cf_send_autoreply( array $values, $event_label ) {
-	$site_name = wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES );
+function aqm_send_autoreply( $form, $fields, array $data ) {
+	$to = aqm_guess_email( $data );
+	if ( ! $to ) {
+		return;
+	}
 
-	$vars = array(
-		'name'       => $values['name'],
-		'email'      => $values['email'],
-		'event_type' => $event_label,
-		'message'    => $values['message'],
-		'site_name'  => $site_name,
+	$site_name = wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES );
+	$vars      = array(
+		'{name}'       => aqm_guess_name( $data ),
+		'{form_name}'  => $form->form_name,
+		'{submission}' => aqm_format_submission( $fields, $data ),
+		'{site_name}'  => $site_name,
 	);
 
 	$headers = array(
 		'Content-Type: text/plain; charset=UTF-8',
-		'From: ' . $site_name . ' <' . aqm_cf_mail_from_address() . '>',
+		'From: ' . $site_name . ' <' . aqm_mail_from_address() . '>',
 	);
-
-	$reply_to = aqm_cf_setting( 'notify_email' );
-	if ( is_email( $reply_to ) ) {
-		$headers[] = 'Reply-To: ' . $reply_to;
+	if ( is_email( $form->notify_email ) ) {
+		$headers[] = 'Reply-To: ' . $form->notify_email;
 	}
 
 	wp_mail(
-		$values['email'],
-		aqm_cf_render_template( (string) aqm_cf_setting( 'autoreply_subject' ), $vars ),
-		aqm_cf_render_template( (string) aqm_cf_setting( 'autoreply_body' ), $vars ),
+		$to,
+		strtr( $form->autoreply_subject ? $form->autoreply_subject : 'We received your message', $vars ),
+		strtr( $form->autoreply_body ? $form->autoreply_body : aqm_default_autoreply_body(), $vars ),
 		$headers
 	);
 }
 
-/* ═══════════════════════════════════════════════════════════════════════
-   6. ASSETS
-   ═══════════════════════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════════════
+   6. FRONT-END ASSETS
+   ══════════════════════════════════════════════════════════════ */
 
-add_action( 'wp_enqueue_scripts', 'aqm_cf_register_assets' );
+add_action( 'wp_enqueue_scripts', 'aqm_register_assets' );
 
-function aqm_cf_register_assets() {
-	wp_register_style( 'aqm-contact-form', false, array(), AQM_CF_VERSION );
-	wp_add_inline_style( 'aqm-contact-form', aqm_cf_styles() );
+function aqm_register_assets() {
+	wp_register_style( 'aqm-form', false, array(), AQM_VERSION );
+	wp_add_inline_style( 'aqm-form', aqm_styles() );
 
-	// Enqueue in <head> when the shortcode is in the main content. Widgets,
-	// footers and archive pages are covered by the fallback in the shortcode.
 	$post = get_post();
-	if ( $post instanceof WP_Post && has_shortcode( (string) $post->post_content, 'aqm_contact_form' ) ) {
-		wp_enqueue_style( 'aqm-contact-form' );
-		aqm_cf_mark_styles_done();
-
-		// Headers have not been sent yet at this point, so this is the useful
-		// place to tell caching layers not to store the page.
-		if ( ! defined( 'DONOTCACHEPAGE' ) ) {
-			define( 'DONOTCACHEPAGE', true );
-		}
-		if ( ! headers_sent() ) {
-			nocache_headers();
-		}
+	if ( $post instanceof WP_Post && has_shortcode( (string) $post->post_content, 'aqm_form' ) ) {
+		wp_enqueue_style( 'aqm-form' );
+		aqm_mark_styles_done();
+		aqm_no_cache();
 	}
 }
 
 /**
- * Tracks whether the form CSS has already been output, so it is printed
- * exactly once however the shortcode reaches the page.
- *
- * @param bool $set Pass true to mark it done.
+ * The form carries a nonce, a CAPTCHA token and a signed timestamp, all of
+ * which go stale inside a full-page cache. A cached copy would hand every
+ * visitor an expired token and the form would refuse every submission.
  */
-function aqm_cf_mark_styles_done( $set = true ) {
+function aqm_no_cache() {
+	if ( ! defined( 'DONOTCACHEPAGE' ) ) {
+		define( 'DONOTCACHEPAGE', true );
+	}
+	if ( ! headers_sent() ) {
+		nocache_headers();
+	}
+}
+
+function aqm_mark_styles_done( $set = true ) {
 	static $done = false;
 	if ( $set ) {
 		$done = true;
@@ -819,214 +845,273 @@ function aqm_cf_mark_styles_done( $set = true ) {
 }
 
 /**
- * Print the CSS inline when we have missed the <head>.
- *
- * v2.0 printed a <style> block inside the shortcode output, which always
- * worked. Enqueuing alone would silently lose all styling when the shortcode
- * sits in a widget, a footer or an archive template, because those render
- * after wp_head() has already printed the stylesheet queue.
+ * v7.0.0 printed its CSS inside every shortcode render, so two forms on one
+ * page shipped the stylesheet twice. This prints it once, wherever the first
+ * form appears, and enqueues it properly when we have not missed the head.
  */
-function aqm_cf_style_fallback() {
-	if ( aqm_cf_mark_styles_done( false ) ) {
+function aqm_style_fallback() {
+	if ( aqm_mark_styles_done( false ) ) {
 		return '';
 	}
-	aqm_cf_mark_styles_done();
-	return '<style id="aqm-contact-form-fallback-css">' . aqm_cf_styles() . '</style>';
+	aqm_mark_styles_done();
+	return '<style id="aqm-form-fallback-css">' . aqm_styles() . '</style>';
 }
 
-function aqm_cf_styles() {
+function aqm_styles() {
 	return <<<CSS
-.aqm-form-wrap{--aqm-primary:#1a4b6e;--aqm-accent:#c8923a;--aqm-border:#d0c9bd;--aqm-text:#2c2c2c;--aqm-error:#c0392b;--aqm-radius:6px;--aqm-shadow:0 2px 8px rgba(0,0,0,.08);max-width:780px;margin:0 auto;font-family:Georgia,'Times New Roman',serif;color:var(--aqm-text)}
-.aqm-alert{display:flex;align-items:flex-start;gap:12px;padding:16px 20px;border-radius:var(--aqm-radius);margin-bottom:24px;font-size:15px;line-height:1.5}
-.aqm-alert--success{background:#eaf5ec;border-left:4px solid #3a8a4a;color:#1e5c29}
-.aqm-alert--error{background:#fdf0f0;border-left:4px solid var(--aqm-error);color:#7b1c1c}
-.aqm-alert__icon{font-weight:bold;font-size:18px;flex-shrink:0;margin-top:1px}
-.aqm-form__row{display:flex;gap:20px}
-.aqm-form__row--half>*{flex:1 1 0;min-width:0}
-@media(max-width:600px){.aqm-form__row{flex-direction:column;gap:0}}
-.aqm-form__group{margin-bottom:20px}
-.aqm-form__group label{display:block;font-size:14px;font-weight:600;letter-spacing:.4px;margin-bottom:6px;color:var(--aqm-primary);text-transform:uppercase;font-family:Arial,sans-serif}
-.aqm-optional{font-weight:400;text-transform:none;color:#767676;font-size:12px;letter-spacing:0}
-.aqm-required{color:#9a6c1f}
-.aqm-form__group input,.aqm-form__group select,.aqm-form__group textarea{width:100%;box-sizing:border-box;padding:11px 14px;border:1px solid var(--aqm-border);border-radius:var(--aqm-radius);background:#fff;font-size:15px;font-family:Georgia,serif;color:var(--aqm-text);transition:border-color .2s,box-shadow .2s;box-shadow:var(--aqm-shadow)}
-.aqm-form__group input:focus,.aqm-form__group select:focus,.aqm-form__group textarea:focus{outline:2px solid transparent;border-color:var(--aqm-primary);box-shadow:0 0 0 3px rgba(26,75,110,.35)}
-.aqm-form__group select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%231a4b6e' d='M6 8L0 0h12z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 14px center;padding-right:36px}
-.aqm-form__group textarea{resize:vertical;min-height:130px}
-.aqm-form__group--invalid input,.aqm-form__group--invalid select,.aqm-form__group--invalid textarea{border-color:var(--aqm-error);box-shadow:0 0 0 3px rgba(192,57,43,.12)}
-.aqm-field-error{display:block;margin-top:6px;font-size:13.5px;color:#8c2f22;font-family:Arial,sans-serif}
-.aqm-form__consent{display:flex;gap:10px;align-items:flex-start;margin-bottom:20px;font-size:14.5px;line-height:1.5}
-.aqm-form__consent input{width:auto;flex:0 0 auto;margin-top:3px;box-shadow:none}
-.aqm-form__consent label{text-transform:none;letter-spacing:0;font-weight:400;font-family:Georgia,serif;font-size:14.5px;color:var(--aqm-text);margin:0}
+.aqm-form-wrap{--aqm-primary:#1a4b6e;--aqm-accent:#9a6c1f;--aqm-border:#d0c9bd;--aqm-text:#2c2c2c;--aqm-error:#c0392b;max-width:780px;margin:0 auto;font-family:Georgia,'Times New Roman',serif;color:var(--aqm-text)}
+.aqm-form-wrap .aqm-alert{display:flex;align-items:flex-start;gap:12px;padding:14px 18px;border-radius:6px;margin-bottom:22px;font-size:15px;line-height:1.5}
+.aqm-form-wrap .aqm-alert--success{background:#eaf5ec;border-left:4px solid #3a8a4a;color:#1e5c29}
+.aqm-form-wrap .aqm-alert--error{background:#fdf0f0;border-left:4px solid var(--aqm-error);color:#7b1c1c}
+.aqm-form-wrap .aqm-icon{font-weight:700;font-size:17px;flex-shrink:0}
+.aqm-form-wrap .aqm-row{display:flex;gap:20px}
+.aqm-form-wrap .aqm-row--half>*{flex:1 1 0;min-width:0}
+@media(max-width:600px){.aqm-form-wrap .aqm-row{flex-direction:column;gap:0}}
+.aqm-form-wrap .aqm-group{margin-bottom:18px}
+.aqm-form-wrap .aqm-group>label{display:block;font-size:12px;font-weight:700;letter-spacing:.5px;margin-bottom:6px;color:var(--aqm-primary);text-transform:uppercase;font-family:Arial,sans-serif}
+.aqm-form-wrap .aqm-opt{font-weight:400;text-transform:none;color:#767676;font-size:11px;letter-spacing:0}
+.aqm-form-wrap .aqm-req{color:var(--aqm-accent);font-size:14px}
+.aqm-form-wrap .aqm-hint{display:block;font-size:12px;color:#767676;margin-top:4px;font-family:Arial,sans-serif;font-style:italic}
+.aqm-form-wrap .aqm-field-error{display:block;margin-top:6px;font-size:13px;color:#8c2f22;font-family:Arial,sans-serif}
+.aqm-form-wrap input:not([type=checkbox]),.aqm-form-wrap select,.aqm-form-wrap textarea{width:100%;box-sizing:border-box;padding:10px 13px;border:1px solid var(--aqm-border);border-radius:6px;background:#fff;font-size:15px;font-family:Georgia,serif;color:var(--aqm-text);transition:border-color .2s,box-shadow .2s;box-shadow:0 2px 6px rgba(0,0,0,.06)}
+.aqm-form-wrap input:focus,.aqm-form-wrap select:focus,.aqm-form-wrap textarea:focus{outline:2px solid transparent;border-color:var(--aqm-primary);box-shadow:0 0 0 3px rgba(26,75,110,.35)}
+.aqm-form-wrap .aqm-group--invalid input,.aqm-form-wrap .aqm-group--invalid select,.aqm-form-wrap .aqm-group--invalid textarea{border-color:var(--aqm-error);box-shadow:0 0 0 3px rgba(192,57,43,.12)}
+.aqm-form-wrap select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%231a4b6e' d='M6 8L0 0h12z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 13px center;padding-right:34px}
+.aqm-form-wrap textarea{resize:vertical;min-height:120px}
+.aqm-form-wrap .aqm-combobox-wrap{position:relative;width:100%}
+.aqm-form-wrap .aqm-combobox-wrap input{width:100%;padding-right:38px;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='9' viewBox='0 0 14 9'%3E%3Cpath fill='%231a4b6e' d='M7 9L0 0h14z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 13px center;cursor:text}
+.aqm-form-wrap .aqm-combobox-hint{display:block;font-size:11px;color:#767676;margin-top:4px;font-family:Arial,sans-serif;font-style:italic}
+.aqm-form-wrap .aqm-chk{display:flex;align-items:center;gap:10px;cursor:pointer;font-size:15px;font-family:Georgia,serif;text-transform:none;letter-spacing:0;font-weight:400;color:var(--aqm-text)}
+.aqm-form-wrap .aqm-chk input{width:17px;height:17px;flex-shrink:0;cursor:pointer}
+.aqm-form-wrap .aqm-captcha-group{background:#f8f6f0;border:1px solid var(--aqm-border);border-radius:6px;padding:14px 16px;width:100%}
+.aqm-form-wrap .aqm-captcha-inner{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:2px}
+.aqm-form-wrap .aqm-captcha-q{background:#fff;border:1px solid var(--aqm-border);border-radius:6px;padding:9px 14px;font-size:16px;font-weight:700;color:var(--aqm-primary);font-family:Georgia,serif}
+.aqm-form-wrap .aqm-captcha-inner input{max-width:160px!important;width:160px!important;font-size:16px;text-align:center;font-weight:700}
 .aqm-hp{position:absolute!important;left:-9999px!important;width:1px!important;height:1px!important;overflow:hidden!important}
-.aqm-form__footer{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-top:8px}
-.aqm-form__note{font-size:13px;color:#6b6b6b;margin:0;font-family:Arial,sans-serif}
-.aqm-btn{display:inline-block;padding:13px 36px;background:var(--aqm-primary);color:#fff;border:none;border-radius:var(--aqm-radius);font-size:15px;font-family:Arial,sans-serif;font-weight:600;letter-spacing:.5px;cursor:pointer;transition:background .2s,transform .1s;box-shadow:0 3px 10px rgba(26,75,110,.25)}
-.aqm-btn:hover{background:#163d5a}
-.aqm-btn:active{transform:translateY(1px)}
-.aqm-btn:focus-visible{outline:3px solid #c8923a;outline-offset:2px}
-@media(prefers-reduced-motion:reduce){.aqm-form__group input,.aqm-form__group select,.aqm-form__group textarea,.aqm-btn{transition:none}}
+.aqm-form-wrap .aqm-footer{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-top:8px;padding-top:14px;border-top:1px solid #eee}
+.aqm-form-wrap .aqm-note{font-size:12px;color:#767676;margin:0;font-family:Arial,sans-serif}
+.aqm-form-wrap .aqm-btn{display:inline-flex;align-items:center;gap:8px;padding:12px 34px;background:var(--aqm-primary);color:#fff;border:none;border-radius:6px;font-size:15px;font-family:Arial,sans-serif;font-weight:600;letter-spacing:.4px;cursor:pointer;transition:background .18s,transform .1s;box-shadow:0 3px 10px rgba(26,75,110,.22)}
+.aqm-form-wrap .aqm-btn:hover{background:#163d5a}
+.aqm-form-wrap .aqm-btn:active{transform:translateY(1px)}
+.aqm-form-wrap .aqm-btn:focus-visible{outline:3px solid #c8923a;outline-offset:2px}
+@media(prefers-reduced-motion:reduce){.aqm-form-wrap input,.aqm-form-wrap select,.aqm-form-wrap textarea,.aqm-form-wrap .aqm-btn{transition:none}}
 CSS;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════
-   7. SHORTCODE  [aqm_contact_form]
-   ═══════════════════════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════════════
+   7. SHORTCODE  [aqm_form id="N"]
+   ══════════════════════════════════════════════════════════════ */
 
-add_shortcode( 'aqm_contact_form', 'aqm_cf_render_form' );
+add_shortcode( 'aqm_form', 'aqm_render_form' );
 
-function aqm_cf_render_form() {
-	// The form carries a nonce and a signed timestamp, both of which go stale
-	// in a full-page cache — a cached copy would hand every visitor an expired
-	// token. Tell the common caching plugins to leave this page alone.
-	if ( ! defined( 'DONOTCACHEPAGE' ) ) {
-		define( 'DONOTCACHEPAGE', true );
+function aqm_render_form( $atts ) {
+	$atts    = shortcode_atts( array( 'id' => 0 ), $atts, 'aqm_form' );
+	$form_id = (int) $atts['id'];
+	$form    = $form_id ? aqm_get_form( $form_id ) : null;
+
+	if ( ! $form ) {
+		// Visitors should never see internal diagnostics.
+		if ( current_user_can( 'manage_options' ) ) {
+			return '<p style="color:#c0392b;font-style:italic">AQM Contact Form: invalid form ID. Use <code>[aqm_form id="N"]</code>.</p>';
+		}
+		return '';
 	}
-	if ( ! headers_sent() ) {
-		nocache_headers();
-	}
+
+	aqm_no_cache();
 
 	if ( ! did_action( 'wp_head' ) ) {
-		wp_enqueue_style( 'aqm-contact-form' );
-		aqm_cf_mark_styles_done();
+		wp_enqueue_style( 'aqm-form' );
+		aqm_mark_styles_done();
 	}
 
-	$flash  = aqm_cf_get_flash();
-	$status = $flash['status'] ?? '';
-	$errors = isset( $flash['errors'] ) && is_array( $flash['errors'] ) ? $flash['errors'] : array();
-	$values = isset( $flash['values'] ) && is_array( $flash['values'] ) ? $flash['values'] : array();
+	$fields = aqm_get_fields( $form_id, true );
 
-	$event_types = aqm_cf_get_event_types();
+	$flash  = aqm_get_flash();
+	$mine   = ( ! empty( $flash ) && (int) ( $flash['form_id'] ?? 0 ) === $form_id );
+	$status = $mine ? ( $flash['status'] ?? '' ) : '';
+	$errors = ( $mine && isset( $flash['errors'] ) && is_array( $flash['errors'] ) ) ? $flash['errors'] : array();
+	$values = ( $mine && isset( $flash['values'] ) && is_array( $flash['values'] ) ) ? $flash['values'] : array();
 
-	$val = static function ( $key ) use ( $values ) {
-		return isset( $values[ $key ] ) ? (string) $values[ $key ] : '';
-	};
+	$captcha = $form->captcha_enabled ? aqm_captcha_fields( $form_id ) : null;
 
 	ob_start();
 	?>
-	<div class="aqm-form-wrap" id="aqm-contact-form">
+	<div class="aqm-form-wrap" id="aqm-form-<?php echo esc_attr( $form_id ); ?>">
 
-		<div class="aqm-alert-region" role="status" aria-live="polite">
+		<div role="status" aria-live="polite">
 			<?php if ( 'success' === $status ) : ?>
-				<div class="aqm-alert aqm-alert--success" tabindex="-1" id="aqm-alert">
-					<span class="aqm-alert__icon" aria-hidden="true">&#10003;</span>
+				<div class="aqm-alert aqm-alert--success" tabindex="-1" id="aqm-alert-<?php echo esc_attr( $form_id ); ?>">
+					<span class="aqm-icon" aria-hidden="true">&#10003;</span>
 					<span><?php echo esc_html( $flash['general'] ?? '' ); ?></span>
 				</div>
 			<?php elseif ( 'error' === $status ) : ?>
-				<div class="aqm-alert aqm-alert--error" tabindex="-1" id="aqm-alert">
-					<span class="aqm-alert__icon" aria-hidden="true">!</span>
+				<div class="aqm-alert aqm-alert--error" tabindex="-1" id="aqm-alert-<?php echo esc_attr( $form_id ); ?>">
+					<span class="aqm-icon" aria-hidden="true">!</span>
 					<span><?php echo esc_html( $flash['general'] ?? '' ); ?></span>
 				</div>
 			<?php endif; ?>
 		</div>
 
 		<?php if ( 'success' === $status ) : ?>
-			<p class="aqm-form__note"><?php esc_html_e( 'If you need to send another message, please refresh this page.', 'aqm-contact-form' ); ?></p>
-		<?php elseif ( ! $event_types ) : ?>
+			<p class="aqm-note">If you need to send another message, please refresh this page.</p>
+		<?php elseif ( ! $fields ) : ?>
 			<div class="aqm-alert aqm-alert--error">
-				<span class="aqm-alert__icon" aria-hidden="true">!</span>
-				<span><?php esc_html_e( 'This form is not available at the moment. Please contact us by telephone or email.', 'aqm-contact-form' ); ?></span>
+				<span class="aqm-icon" aria-hidden="true">!</span>
+				<span>This form is not available at the moment. Please contact us by telephone or email.</span>
 			</div>
 		<?php else : ?>
 
 		<form class="aqm-form" method="post" action="">
-			<?php wp_nonce_field( 'aqm_contact_submit', 'aqm_nonce' ); ?>
-			<input type="hidden" name="aqm_cf_submit" value="1">
-			<input type="hidden" name="aqm_ts" value="<?php echo esc_attr( aqm_cf_timestamp_token() ); ?>">
+			<?php wp_nonce_field( 'aqm_submit_form_' . $form_id, 'aqm_nonce_' . $form_id ); ?>
+			<input type="hidden" name="aqm_form_id" value="<?php echo esc_attr( $form_id ); ?>">
+			<input type="hidden" name="aqm_ts" value="<?php echo esc_attr( aqm_timestamp_token() ); ?>">
 
-			<?php if ( aqm_cf_setting( 'spam_protection' ) ) : ?>
+			<?php if ( $form->spam_protection ) : ?>
 				<div class="aqm-hp" aria-hidden="true">
-					<label for="aqm_website"><?php esc_html_e( 'Leave this field empty', 'aqm-contact-form' ); ?></label>
-					<input type="text" id="aqm_website" name="aqm_website" value="" tabindex="-1" autocomplete="off">
+					<label for="aqm_website_<?php echo esc_attr( $form_id ); ?>">Leave this field empty</label>
+					<input type="text" id="aqm_website_<?php echo esc_attr( $form_id ); ?>" name="aqm_website" value="" tabindex="-1" autocomplete="off">
 				</div>
 			<?php endif; ?>
 
-			<div class="aqm-form__row aqm-form__row--half">
-				<div class="aqm-form__group<?php echo isset( $errors['name'] ) ? ' aqm-form__group--invalid' : ''; ?>">
-					<label for="aqm_name"><?php esc_html_e( 'Full Name', 'aqm-contact-form' ); ?> <span class="aqm-required" aria-hidden="true">*</span></label>
-					<input type="text" id="aqm_name" name="aqm_name" maxlength="120"
-						placeholder="<?php esc_attr_e( 'Your full name', 'aqm-contact-form' ); ?>"
-						autocomplete="name"
-						value="<?php echo esc_attr( $val( 'name' ) ); ?>"
-						required aria-required="true"
-						<?php echo isset( $errors['name'] ) ? 'aria-invalid="true" aria-describedby="aqm_name_error"' : ''; ?>>
-					<?php if ( isset( $errors['name'] ) ) : ?>
-						<span class="aqm-field-error" id="aqm_name_error"><?php echo esc_html( $errors['name'] ); ?></span>
-					<?php endif; ?>
-				</div>
+			<?php
+			// Pair narrow fields two per row; wide ones take the full width.
+			$pairs = array();
+			$i     = 0;
+			$count = count( $fields );
+			$wide  = array( 'textarea', 'checkbox', 'combobox' );
 
-				<div class="aqm-form__group<?php echo isset( $errors['email'] ) ? ' aqm-form__group--invalid' : ''; ?>">
-					<label for="aqm_email"><?php esc_html_e( 'Email Address', 'aqm-contact-form' ); ?> <span class="aqm-required" aria-hidden="true">*</span></label>
-					<input type="email" id="aqm_email" name="aqm_email" maxlength="120"
-						placeholder="your@email.com"
-						autocomplete="email" inputmode="email"
-						value="<?php echo esc_attr( $val( 'email' ) ); ?>"
-						required aria-required="true"
-						<?php echo isset( $errors['email'] ) ? 'aria-invalid="true" aria-describedby="aqm_email_error"' : ''; ?>>
-					<?php if ( isset( $errors['email'] ) ) : ?>
-						<span class="aqm-field-error" id="aqm_email_error"><?php echo esc_html( $errors['email'] ); ?></span>
-					<?php endif; ?>
-				</div>
-			</div>
+			while ( $i < $count ) {
+				$a = $fields[ $i ];
+				if ( in_array( $a->field_type, $wide, true ) ) {
+					$pairs[] = array( $a );
+					$i++;
+					continue;
+				}
+				$b = $fields[ $i + 1 ] ?? null;
+				if ( $b && ! in_array( $b->field_type, $wide, true ) ) {
+					$pairs[] = array( $a, $b );
+					$i      += 2;
+				} else {
+					$pairs[] = array( $a );
+					$i++;
+				}
+			}
 
-			<div class="aqm-form__row aqm-form__row--half">
-				<div class="aqm-form__group<?php echo isset( $errors['phone'] ) ? ' aqm-form__group--invalid' : ''; ?>">
-					<label for="aqm_phone"><?php esc_html_e( 'Telephone', 'aqm-contact-form' ); ?> <span class="aqm-optional"><?php esc_html_e( '(optional)', 'aqm-contact-form' ); ?></span></label>
-					<input type="tel" id="aqm_phone" name="aqm_phone" maxlength="30"
-						placeholder="(905) 555-0100"
-						autocomplete="tel" inputmode="tel"
-						value="<?php echo esc_attr( $val( 'phone' ) ); ?>"
-						<?php echo isset( $errors['phone'] ) ? 'aria-invalid="true" aria-describedby="aqm_phone_error"' : ''; ?>>
-					<?php if ( isset( $errors['phone'] ) ) : ?>
-						<span class="aqm-field-error" id="aqm_phone_error"><?php echo esc_html( $errors['phone'] ); ?></span>
-					<?php endif; ?>
-				</div>
+			foreach ( $pairs as $pair ) :
+				$full = ( 1 === count( $pair ) );
+				?>
+				<div class="aqm-row <?php echo $full ? '' : 'aqm-row--half'; ?>">
+				<?php
+				foreach ( $pair as $f ) :
+					$name     = 'aqm_f' . $form_id . '_' . $f->field_key;
+					$id       = 'aqmf' . $form_id . '_' . $f->field_key;
+					$value    = (string) ( $values[ $f->field_key ] ?? '' );
+					$invalid  = isset( $errors[ $f->field_key ] );
+					$err_id   = $id . '_error';
+					$describe = $invalid ? ' aria-invalid="true" aria-describedby="' . esc_attr( $err_id ) . '"' : '';
+					$required = $f->required ? ' required aria-required="true"' : '';
+					$auto     = aqm_autocomplete_for( $f );
+					?>
+					<div class="aqm-group<?php echo $invalid ? ' aqm-group--invalid' : ''; ?>">
+						<label for="<?php echo esc_attr( $id ); ?>">
+							<?php echo esc_html( $f->label ); ?>
+							<?php if ( $f->required ) : ?>
+								<span class="aqm-req" aria-hidden="true">*</span>
+							<?php else : ?>
+								<span class="aqm-opt">(optional)</span>
+							<?php endif; ?>
+						</label>
 
-				<div class="aqm-form__group<?php echo isset( $errors['event_type'] ) ? ' aqm-form__group--invalid' : ''; ?>">
-					<label for="aqm_event_type"><?php echo esc_html( aqm_cf_field_label() ); ?> <span class="aqm-required" aria-hidden="true">*</span></label>
-					<select id="aqm_event_type" name="aqm_event_type" required aria-required="true"
-						<?php echo isset( $errors['event_type'] ) ? 'aria-invalid="true" aria-describedby="aqm_event_type_error"' : ''; ?>>
-						<option value=""><?php esc_html_e( '— Please select —', 'aqm-contact-form' ); ?></option>
-						<?php foreach ( $event_types as $type ) : ?>
-							<option value="<?php echo esc_attr( $type->id ); ?>" <?php selected( (int) $val( 'event_type' ), (int) $type->id ); ?>>
-								<?php echo esc_html( $type->label ); ?>
-							</option>
-						<?php endforeach; ?>
-					</select>
-					<?php if ( isset( $errors['event_type'] ) ) : ?>
-						<span class="aqm-field-error" id="aqm_event_type_error"><?php echo esc_html( $errors['event_type'] ); ?></span>
-					<?php endif; ?>
-				</div>
-			</div>
+						<?php if ( 'textarea' === $f->field_type ) : ?>
+							<textarea id="<?php echo esc_attr( $id ); ?>" name="<?php echo esc_attr( $name ); ?>"
+								rows="5" maxlength="5000"
+								placeholder="<?php echo esc_attr( $f->placeholder ); ?>"
+								<?php echo $required . $describe; // phpcs:ignore ?>><?php echo esc_textarea( $value ); ?></textarea>
 
-			<div class="aqm-form__group<?php echo isset( $errors['message'] ) ? ' aqm-form__group--invalid' : ''; ?>">
-				<label for="aqm_message"><?php esc_html_e( 'Message', 'aqm-contact-form' ); ?> <span class="aqm-required" aria-hidden="true">*</span></label>
-				<textarea id="aqm_message" name="aqm_message" rows="6" maxlength="5000"
-					placeholder="<?php esc_attr_e( 'Please describe your inquiry or event in as much detail as you’d like…', 'aqm-contact-form' ); ?>"
-					required aria-required="true"
-					<?php echo isset( $errors['message'] ) ? 'aria-invalid="true" aria-describedby="aqm_message_error"' : ''; ?>><?php echo esc_textarea( $val( 'message' ) ); ?></textarea>
-				<?php if ( isset( $errors['message'] ) ) : ?>
-					<span class="aqm-field-error" id="aqm_message_error"><?php echo esc_html( $errors['message'] ); ?></span>
-				<?php endif; ?>
-			</div>
+						<?php elseif ( 'select' === $f->field_type ) : ?>
+							<select id="<?php echo esc_attr( $id ); ?>" name="<?php echo esc_attr( $name ); ?>"
+								<?php echo $required . $describe; // phpcs:ignore ?>>
+								<option value="">- Please select -</option>
+								<?php foreach ( aqm_get_options( $f->id ) as $opt ) : ?>
+									<option value="<?php echo esc_attr( $opt->id ); ?>" <?php selected( $value, $opt->label ); ?>>
+										<?php echo esc_html( $opt->label ); ?>
+									</option>
+								<?php endforeach; ?>
+							</select>
 
-			<?php if ( aqm_cf_setting( 'consent_enabled' ) ) : ?>
-				<div class="aqm-form__group aqm-form__consent<?php echo isset( $errors['consent'] ) ? ' aqm-form__group--invalid' : ''; ?>">
-					<input type="checkbox" id="aqm_consent" name="aqm_consent" value="1"
-						<?php checked( '1', $val( 'consent' ) ); ?>
-						required aria-required="true"
-						<?php echo isset( $errors['consent'] ) ? 'aria-invalid="true" aria-describedby="aqm_consent_error"' : ''; ?>>
-					<label for="aqm_consent">
-						<?php echo esc_html( (string) aqm_cf_setting( 'consent_text' ) ); ?>
-						<?php if ( isset( $errors['consent'] ) ) : ?>
-							<span class="aqm-field-error" id="aqm_consent_error"><?php echo esc_html( $errors['consent'] ); ?></span>
+						<?php elseif ( 'combobox' === $f->field_type ) : ?>
+							<?php $list_id = 'aqm_dl_' . $form_id . '_' . $f->field_key; ?>
+							<div class="aqm-combobox-wrap">
+								<input type="text" id="<?php echo esc_attr( $id ); ?>" name="<?php echo esc_attr( $name ); ?>"
+									list="<?php echo esc_attr( $list_id ); ?>" maxlength="200"
+									placeholder="<?php echo esc_attr( $f->placeholder ? $f->placeholder : 'Type or select from list...' ); ?>"
+									value="<?php echo esc_attr( $value ); ?>"
+									autocomplete="off"
+									<?php echo $required . $describe; // phpcs:ignore ?>>
+								<datalist id="<?php echo esc_attr( $list_id ); ?>">
+									<?php foreach ( aqm_get_options( $f->id ) as $opt ) : ?>
+										<option value="<?php echo esc_attr( $opt->label ); ?>"></option>
+									<?php endforeach; ?>
+								</datalist>
+								<span class="aqm-combobox-hint">Choose from the list or type your own value</span>
+							</div>
+
+						<?php elseif ( 'checkbox' === $f->field_type ) : ?>
+							<label class="aqm-chk">
+								<input type="checkbox" name="<?php echo esc_attr( $name ); ?>" value="Yes"
+									<?php checked( 'Yes', $value ); ?>
+									<?php echo $required . $describe; // phpcs:ignore ?>>
+								<?php echo esc_html( $f->placeholder ? $f->placeholder : $f->label ); ?>
+							</label>
+
+						<?php else : ?>
+							<input type="<?php echo esc_attr( $f->field_type ); ?>"
+								id="<?php echo esc_attr( $id ); ?>" name="<?php echo esc_attr( $name ); ?>"
+								maxlength="200"
+								placeholder="<?php echo esc_attr( $f->placeholder ); ?>"
+								value="<?php echo esc_attr( $value ); ?>"
+								<?php echo $auto ? 'autocomplete="' . esc_attr( $auto ) . '"' : ''; ?>
+								<?php echo $required . $describe; // phpcs:ignore ?>>
+							<?php if ( 'email' === $f->field_type && ! $invalid ) : ?>
+								<span class="aqm-hint">We will never share your email address.</span>
+							<?php endif; ?>
 						<?php endif; ?>
-					</label>
+
+						<?php if ( $invalid ) : ?>
+							<span class="aqm-field-error" id="<?php echo esc_attr( $err_id ); ?>"><?php echo esc_html( $errors[ $f->field_key ] ); ?></span>
+						<?php endif; ?>
+					</div>
+				<?php endforeach; ?>
+				</div>
+			<?php endforeach; ?>
+
+			<?php if ( $captcha ) : ?>
+				<?php $cap_invalid = isset( $errors['__captcha'] ); ?>
+				<div class="aqm-row">
+					<div class="aqm-group aqm-captcha-group<?php echo $cap_invalid ? ' aqm-group--invalid' : ''; ?>">
+						<label for="aqm_captcha_<?php echo esc_attr( $form_id ); ?>">Security Check <span class="aqm-req" aria-hidden="true">*</span></label>
+						<div class="aqm-captcha-inner">
+							<div class="aqm-captcha-q" aria-hidden="true"><?php echo esc_html( $captcha['question'] ); ?></div>
+							<input type="number" id="aqm_captcha_<?php echo esc_attr( $form_id ); ?>"
+								name="aqm_captcha_<?php echo esc_attr( $form_id ); ?>"
+								aria-label="<?php echo esc_attr( $captcha['question'] ); ?>"
+								placeholder="Answer" min="0" max="99" autocomplete="off" required aria-required="true"
+								<?php echo $cap_invalid ? 'aria-invalid="true" aria-describedby="aqm_captcha_err_' . esc_attr( $form_id ) . '"' : ''; ?>>
+						</div>
+						<input type="hidden" name="aqm_captcha_token_<?php echo esc_attr( $form_id ); ?>" value="<?php echo esc_attr( $captcha['token'] ); ?>">
+						<input type="hidden" name="aqm_captcha_ts_<?php echo esc_attr( $form_id ); ?>" value="<?php echo esc_attr( $captcha['ts'] ); ?>">
+						<?php if ( $cap_invalid ) : ?>
+							<span class="aqm-field-error" id="aqm_captcha_err_<?php echo esc_attr( $form_id ); ?>"><?php echo esc_html( $errors['__captcha'] ); ?></span>
+						<?php else : ?>
+							<span class="aqm-hint">Solve the simple sum to show you are not a robot.</span>
+						<?php endif; ?>
+					</div>
 				</div>
 			<?php endif; ?>
 
-			<div class="aqm-form__footer">
-				<p class="aqm-form__note"><span class="aqm-required" aria-hidden="true">*</span> <?php esc_html_e( 'Required fields', 'aqm-contact-form' ); ?></p>
-				<button type="submit" class="aqm-btn"><?php esc_html_e( 'Send Message', 'aqm-contact-form' ); ?></button>
+			<div class="aqm-footer">
+				<p class="aqm-note"><span class="aqm-req" aria-hidden="true">*</span> Required fields</p>
+				<button type="submit" class="aqm-btn">Send Message</button>
 			</div>
 		</form>
 		<?php endif; ?>
@@ -1035,257 +1120,1066 @@ function aqm_cf_render_form() {
 	<?php if ( $status ) : ?>
 	<script>
 	(function () {
-		var alertBox = document.getElementById('aqm-alert');
-		if (!alertBox) { return; }
-		alertBox.focus();
-		var firstInvalid = document.querySelector('.aqm-form__group--invalid input, .aqm-form__group--invalid select, .aqm-form__group--invalid textarea');
-		if (firstInvalid) { firstInvalid.focus({ preventScroll: true }); }
+		var box = document.getElementById('aqm-alert-<?php echo (int) $form_id; ?>');
+		if (!box) { return; }
+		box.focus();
+		var wrap = document.getElementById('aqm-form-<?php echo (int) $form_id; ?>');
+		var bad = wrap && wrap.querySelector('.aqm-group--invalid input, .aqm-group--invalid select, .aqm-group--invalid textarea');
+		if (bad) { bad.focus({ preventScroll: true }); }
 	})();
 	</script>
 	<?php endif; ?>
 	<?php
-	return aqm_cf_style_fallback() . ob_get_clean();
+	return aqm_style_fallback() . ob_get_clean();
 }
 
-/* ═══════════════════════════════════════════════════════════════════════
-   8. ADMIN — menu
-   ═══════════════════════════════════════════════════════════════════════ */
-
-add_action( 'admin_menu', 'aqm_cf_admin_menu' );
-
-function aqm_cf_admin_menu() {
-	add_menu_page(
-		__( 'A. Q. Mufti Contact', 'aqm-contact-form' ),
-		__( 'AQM Contact', 'aqm-contact-form' ),
-		'manage_options',
-		'aqm-contact-entries',
-		'aqm_cf_entries_page',
-		'dashicons-email-alt',
-		30
+function aqm_autocomplete_for( $field ) {
+	$map = array(
+		'email' => 'email',
+		'tel'   => 'tel',
+		'url'   => 'url',
 	);
-	add_submenu_page( 'aqm-contact-entries', __( 'Contact Entries', 'aqm-contact-form' ), __( 'Contact Entries', 'aqm-contact-form' ), 'manage_options', 'aqm-contact-entries', 'aqm_cf_entries_page' );
-	add_submenu_page( 'aqm-contact-entries', __( 'Manage Event Types', 'aqm-contact-form' ), __( 'Event Types', 'aqm-contact-form' ), 'manage_options', 'aqm-event-types', 'aqm_cf_event_types_page' );
-	add_submenu_page( 'aqm-contact-entries', __( 'Contact Form Settings', 'aqm-contact-form' ), __( 'Settings', 'aqm-contact-form' ), 'manage_options', 'aqm-contact-settings', 'aqm_cf_settings_page' );
+	if ( isset( $map[ $field->field_type ] ) ) {
+		return $map[ $field->field_type ];
+	}
+	if ( false !== strpos( $field->field_key, 'name' ) ) {
+		return 'name';
+	}
+	return '';
 }
 
-/** Warn the admin when the mailer is silently failing. */
-add_action( 'admin_notices', 'aqm_cf_mail_failure_notice' );
+/* ══════════════════════════════════════════════════════════════
+   8. ADMIN - menu, assets, notices
+   ══════════════════════════════════════════════════════════════ */
 
-function aqm_cf_mail_failure_notice() {
+add_action( 'admin_menu', 'aqm_admin_menu' );
+
+function aqm_admin_menu() {
+	add_menu_page( 'AQM Contact Forms', 'AQM Contact', 'manage_options', 'aqm-forms', 'aqm_admin_forms_page', 'dashicons-feedback', 30 );
+	add_submenu_page( 'aqm-forms', 'All Forms', 'All Forms', 'manage_options', 'aqm-forms', 'aqm_admin_forms_page' );
+	add_submenu_page( 'aqm-forms', 'Form Builder', 'Form Builder', 'manage_options', 'aqm-form-builder', 'aqm_admin_builder_page' );
+	add_submenu_page( 'aqm-forms', 'Submissions', 'Submissions', 'manage_options', 'aqm-submissions', 'aqm_admin_submissions_page' );
+	add_submenu_page( 'aqm-forms', 'Global Settings', 'Settings', 'manage_options', 'aqm-settings', 'aqm_admin_settings_page' );
+}
+
+add_action( 'admin_notices', 'aqm_mail_failure_notice' );
+
+function aqm_mail_failure_notice() {
 	if ( ! current_user_can( 'manage_options' ) ) {
 		return;
 	}
-	$entry_id = (int) get_transient( 'aqm_cf_mail_failure' );
-	if ( ! $entry_id ) {
+	if ( ! get_transient( 'aqm_mail_failure' ) ) {
 		return;
 	}
-	echo '<div class="notice notice-error"><p><strong>' . esc_html__( 'AQM Contact Form:', 'aqm-contact-form' ) . '</strong> ';
-	echo esc_html__( 'WordPress could not send the notification email for a recent submission. The enquiry was saved — please check Contact Entries and consider installing an SMTP plugin.', 'aqm-contact-form' );
-	echo ' <a href="' . esc_url( admin_url( 'admin.php?page=aqm-contact-entries&action=view&id=' . $entry_id ) ) . '">' . esc_html__( 'View entry', 'aqm-contact-form' ) . '</a></p></div>';
-	delete_transient( 'aqm_cf_mail_failure' );
+	echo '<div class="notice notice-error"><p><strong>AQM Contact Form:</strong> WordPress could not send the notification email for a recent submission. The enquiry was saved - please check Submissions, and consider installing an SMTP plugin. ';
+	echo '<a href="' . esc_url( admin_url( 'admin.php?page=aqm-submissions' ) ) . '">View submissions</a></p></div>';
+	delete_transient( 'aqm_mail_failure' );
 }
 
-/* ═══════════════════════════════════════════════════════════════════════
-   9. ADMIN — Contact Entries (list, view, bulk delete, CSV export)
-   ═══════════════════════════════════════════════════════════════════════ */
+/**
+ * Admin notices travel as short codes in the URL after a redirect, never as
+ * raw HTML, so nothing user-supplied is ever echoed unescaped.
+ */
+function aqm_notice_text( $code ) {
+	$map = array(
+		'form_created'    => array( 'success', 'Form created with default fields.' ),
+		'form_deleted'    => array( 'success', 'Form deleted.' ),
+		'form_duplicated' => array( 'success', 'Form duplicated.' ),
+		'form_name_empty' => array( 'error', 'Please enter a form name.' ),
+		'settings_saved'  => array( 'success', 'Settings saved.' ),
+		'field_saved'     => array( 'success', 'Field saved.' ),
+		'field_deleted'   => array( 'success', 'Field deleted.' ),
+		'field_shown'     => array( 'success', 'Field is now visible on the form.' ),
+		'field_hidden'    => array( 'success', 'Field is now hidden from the form.' ),
+		'field_required'  => array( 'success', 'Field marked as required.' ),
+		'field_optional'  => array( 'success', 'Field marked as optional.' ),
+		'field_empty'     => array( 'error', 'The field label cannot be empty.' ),
+		'option_saved'    => array( 'success', 'Option saved.' ),
+		'option_deleted'  => array( 'success', 'Option deleted.' ),
+		'option_empty'    => array( 'error', 'The option label cannot be empty.' ),
+		'entries_deleted' => array( 'success', 'Selected submissions deleted.' ),
+		'delete_failed'   => array( 'error', 'The submissions could not be deleted - a database error was logged.' ),
+		'nothing_picked'  => array( 'error', 'Nothing was selected.' ),
+	);
+	return $map[ $code ] ?? null;
+}
 
-function aqm_cf_entries_page() {
-	if ( ! current_user_can( 'manage_options' ) ) {
-		wp_die( esc_html__( 'You do not have permission to view this page.', 'aqm-contact-form' ) );
+function aqm_render_notice() {
+	if ( empty( $_GET['aqm_msg'] ) ) {
+		return;
+	}
+	$notice = aqm_notice_text( sanitize_key( wp_unslash( $_GET['aqm_msg'] ) ) );
+	if ( ! $notice ) {
+		return;
+	}
+	echo '<div class="notice notice-' . esc_attr( $notice[0] ) . ' is-dismissible"><p>' . esc_html( $notice[1] ) . '</p></div>';
+}
+
+add_action( 'admin_enqueue_scripts', 'aqm_admin_scripts' );
+
+function aqm_admin_scripts( $hook ) {
+	if ( false === strpos( $hook, 'aqm' ) ) {
+		return;
 	}
 
-	$action = isset( $_GET['action'] ) ? sanitize_key( wp_unslash( $_GET['action'] ) ) : '';
-	if ( 'view' === $action ) {
-		aqm_cf_entry_detail_page( isset( $_GET['id'] ) ? (int) $_GET['id'] : 0 );
-		return;
+	wp_enqueue_script( 'jquery-ui-sortable' );
+	wp_add_inline_script(
+		'jquery-ui-sortable',
+		'jQuery(function($){
+			var nonce=' . wp_json_encode( wp_create_nonce( 'aqm_admin_nonce' ) ) . ';
+			var formId=' . (int) ( $_GET['form_id'] ?? 0 ) . ';
+			function flash($el,msg){$el.text(msg).css("color","#3a8a4a");setTimeout(function(){$el.text("");},2500);}
+			function bind(sel,action,child,status){
+				if(!$(sel).length){return;}
+				$(sel).sortable({handle:".aqm-drag-handle",axis:"y",update:function(){
+					var order=[];
+					$(sel+" "+child).each(function(){order.push($(this).data("id"));});
+					$.post(ajaxurl,{action:action,nonce:nonce,form_id:formId,order:order},function(r){
+						flash($(status), r && r.success ? "Order saved" : "Could not save order");
+					});
+				}});
+			}
+			bind("#aqm-fields-sortable","aqm_save_field_order","tr","#aqm-order-status");
+			bind("#aqm-options-sortable","aqm_save_option_order","li","#aqm-opt-order-status");
+		});'
+	);
+
+	wp_add_inline_style(
+		'wp-admin',
+		'.aqm-drag-handle{cursor:grab;color:#767676;padding:0 10px;font-size:15px;user-select:none}
+		.aqm-drag-handle:hover{color:#333}
+		.ui-sortable-helper{background:#fff!important;box-shadow:0 4px 16px rgba(0,0,0,.2)!important;display:table}
+		#aqm-options-sortable{list-style:none;margin:0;padding:0}
+		#aqm-options-sortable li{display:flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid #ddd;border-radius:4px;margin-bottom:6px;background:#fafafa}
+		.aqm-badge{display:inline-flex;align-items:center;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700;cursor:pointer;text-decoration:none;transition:opacity .15s;border:1px solid transparent}
+		.aqm-badge:hover{opacity:.75;text-decoration:none}
+		.aqm-badge-on{background:#eaf5ec;color:#1e5c29;border-color:#b5debb}
+		.aqm-badge-off{background:#f5f5f5;color:#666;border-color:#ddd}
+		.aqm-badge-req{background:#fff3cd;color:#856404;border-color:#ffc107}
+		.aqm-badge-opt{background:#e8f4fd;color:#0c5fa5;border-color:#b8d9f5}
+		.aqm-box{background:#fff;border:1px solid #ddd;border-radius:6px;padding:20px 24px;margin-bottom:20px}
+		.aqm-type-badge{background:#e8f0fe;color:#1a56db;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+		.aqm-type-badge-combobox{background:#f0e8fe;color:#6b21d6;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+		.aqm-save-status{font-size:12px;color:#3a8a4a;margin-left:12px;font-style:italic}
+		tr.aqm-disabled{opacity:.5}
+		.aqm-form-card{background:#fff;border:1px solid #ddd;border-radius:8px;padding:18px 22px;margin-bottom:16px;display:flex;align-items:flex-start;gap:16px}
+		.aqm-form-card-body{flex:1}
+		.aqm-form-card h3{margin:0 0 6px;font-size:16px}
+		.aqm-form-card p{margin:0;color:#555;font-size:13px}
+		.aqm-form-card-actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+		.aqm-form-id-badge{background:#1a4b6e;color:#fff;border-radius:6px;padding:6px 14px;font-size:22px;font-weight:700;min-width:44px;text-align:center;flex-shrink:0}
+		.aqm-shortcode-box{background:#f0f4f8;border:1px solid #c5d8ea;border-radius:4px;padding:6px 12px;font-family:monospace;font-size:13px;color:#1a4b6e;display:inline-block;cursor:pointer}
+		.aqm-tbl-actions{display:flex;gap:5px;flex-wrap:wrap}'
+	);
+}
+
+/* ---- AJAX reordering ---- */
+
+add_action( 'wp_ajax_aqm_save_field_order', 'aqm_ajax_field_order' );
+
+function aqm_ajax_field_order() {
+	check_ajax_referer( 'aqm_admin_nonce', 'nonce' );
+	if ( ! current_user_can( 'manage_options' ) ) {
+		wp_send_json_error( 'Forbidden', 403 );
 	}
 
 	global $wpdb;
-	$table  = aqm_cf_entries_table();
-	$notice = '';
+	$form_id = (int) ( $_POST['form_id'] ?? 0 );
+	$order   = array_values( array_filter( array_map( 'intval', (array) ( $_POST['order'] ?? array() ) ) ) );
 
-	/* ---- Bulk delete, then redirect so a refresh cannot repeat it ---- */
-	if ( isset( $_POST['aqm_bulk_nonce'] ) ) {
-		check_admin_referer( 'aqm_cf_bulk_entries', 'aqm_bulk_nonce' );
+	foreach ( $order as $pos => $id ) {
+		// Scoped to the form, so a stray ID cannot reorder another form's fields.
+		$wpdb->update(
+			aqm_table( 'form_fields' ),
+			array( 'sort_order' => $pos + 1 ),
+			array(
+				'id'      => $id,
+				'form_id' => $form_id,
+			),
+			array( '%d' ),
+			array( '%d', '%d' )
+		);
+	}
 
-		$ids = isset( $_POST['entry_ids'] ) ? array_map( 'intval', (array) wp_unslash( $_POST['entry_ids'] ) ) : array();
-		$ids = array_values( array_filter( $ids ) );
-		$act = isset( $_POST['bulk_action'] ) ? sanitize_key( wp_unslash( $_POST['bulk_action'] ) ) : '';
+	wp_send_json_success();
+}
 
-		$result = 'none';
-		if ( 'delete' === $act && $ids ) {
-			$placeholders = implode( ',', array_fill( 0, count( $ids ), '%d' ) );
-			$deleted      = $wpdb->query( $wpdb->prepare( "DELETE FROM $table WHERE id IN ($placeholders)", $ids ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+add_action( 'wp_ajax_aqm_save_option_order', 'aqm_ajax_option_order' );
 
-			if ( false === $deleted ) {
-				error_log( 'AQM Contact Form: bulk delete failed — ' . $wpdb->last_error );
-				$result = 'failed';
-			} else {
-				$result = (int) $deleted;
-			}
+function aqm_ajax_option_order() {
+	check_ajax_referer( 'aqm_admin_nonce', 'nonce' );
+	if ( ! current_user_can( 'manage_options' ) ) {
+		wp_send_json_error( 'Forbidden', 403 );
+	}
+
+	global $wpdb;
+	$order = array_values( array_filter( array_map( 'intval', (array) ( $_POST['order'] ?? array() ) ) ) );
+
+	foreach ( $order as $pos => $id ) {
+		$wpdb->update( aqm_table( 'field_options' ), array( 'sort_order' => $pos + 1 ), array( 'id' => $id ), array( '%d' ), array( '%d' ) );
+	}
+
+	wp_send_json_success();
+}
+
+/* ══════════════════════════════════════════════════════════════
+   9. ADMIN PAGE - All Forms
+   ══════════════════════════════════════════════════════════════ */
+
+function aqm_admin_forms_page() {
+	if ( ! current_user_can( 'manage_options' ) ) {
+		wp_die( 'You do not have permission to view this page.' );
+	}
+
+	global $wpdb;
+	$base = admin_url( 'admin.php?page=aqm-forms' );
+
+	/* ---- Create. Redirects, so a refresh cannot create a second form ---- */
+	if ( isset( $_POST['aqm_new_form_nonce'] ) ) {
+		check_admin_referer( 'aqm_create_form', 'aqm_new_form_nonce' );
+
+		$name = isset( $_POST['new_form_name'] ) ? sanitize_text_field( wp_unslash( $_POST['new_form_name'] ) ) : '';
+		if ( '' === $name ) {
+			wp_safe_redirect( add_query_arg( 'aqm_msg', 'form_name_empty', $base ) );
+			exit;
 		}
 
-		// Preserve the current search/filter, but go back to page one: the
-		// page the admin was on may no longer exist after a delete.
-		$back = add_query_arg(
-			array(
-				'page'          => 'aqm-contact-entries',
-				's'             => isset( $_GET['s'] ) ? sanitize_text_field( wp_unslash( $_GET['s'] ) ) : '',
-				'event_type_id' => isset( $_GET['event_type_id'] ) ? (int) $_GET['event_type_id'] : 0,
-				'aqm_deleted'   => $result,
-			),
-			admin_url( 'admin.php' )
+		$new_id = aqm_seed_default_form( $name );
+		wp_safe_redirect(
+			add_query_arg(
+				array(
+					'page'    => 'aqm-form-builder',
+					'form_id' => $new_id,
+					'aqm_msg' => 'form_created',
+				),
+				admin_url( 'admin.php' )
+			)
 		);
-		wp_safe_redirect( $back );
 		exit;
 	}
 
-	if ( isset( $_GET['aqm_deleted'] ) ) {
-		$result = sanitize_text_field( wp_unslash( $_GET['aqm_deleted'] ) );
-		if ( 'failed' === $result ) {
-			$notice = __( 'The entries could not be deleted — a database error was logged.', 'aqm-contact-form' );
-		} elseif ( 'none' === $result ) {
-			$notice = __( 'No entries were selected.', 'aqm-contact-form' );
-		} else {
-			$notice = sprintf(
-				/* translators: %d: number of entries */
-				_n( '%d entry deleted.', '%d entries deleted.', (int) $result, 'aqm-contact-form' ),
-				(int) $result
-			);
+	$action = isset( $_GET['action'] ) ? sanitize_key( wp_unslash( $_GET['action'] ) ) : '';
+
+	/* ---- Delete ---- */
+	if ( 'delete_form' === $action && isset( $_GET['id'] ) ) {
+		$fid = (int) $_GET['id'];
+		check_admin_referer( 'aqm_del_form_' . $fid );
+
+		$field_ids = $wpdb->get_col( $wpdb->prepare( 'SELECT id FROM ' . aqm_table( 'form_fields' ) . ' WHERE form_id = %d', $fid ) ); // phpcs:ignore
+		foreach ( $field_ids as $fld ) {
+			$wpdb->delete( aqm_table( 'field_options' ), array( 'field_id' => (int) $fld ), array( '%d' ) );
 		}
+		$wpdb->delete( aqm_table( 'form_fields' ), array( 'form_id' => $fid ), array( '%d' ) );
+		$wpdb->delete( aqm_table( 'contact_entries' ), array( 'form_id' => $fid ), array( '%d' ) );
+		$wpdb->delete( aqm_table( 'forms' ), array( 'id' => $fid ), array( '%d' ) );
+
+		wp_safe_redirect( add_query_arg( 'aqm_msg', 'form_deleted', $base ) );
+		exit;
 	}
 
-	/* ---- Filters & pagination ---- */
-	$search   = isset( $_GET['s'] ) ? sanitize_text_field( wp_unslash( $_GET['s'] ) ) : '';
-	$type_id  = isset( $_GET['event_type_id'] ) ? (int) $_GET['event_type_id'] : 0;
-	$paged    = max( 1, isset( $_GET['paged'] ) ? (int) $_GET['paged'] : 1 );
-	$per_page = 25;
+	/* ---- Duplicate ---- */
+	if ( 'duplicate_form' === $action && isset( $_GET['id'] ) ) {
+		$fid = (int) $_GET['id'];
+		check_admin_referer( 'aqm_dup_form_' . $fid );
 
+		$src = aqm_get_form( $fid );
+		if ( $src ) {
+			$wpdb->insert(
+				aqm_table( 'forms' ),
+				array(
+					'form_name'         => $src->form_name . ' (Copy)',
+					'notify_email'      => $src->notify_email,
+					'notify_cc'         => $src->notify_cc,
+					'email_subject'     => $src->email_subject,
+					'captcha_enabled'   => $src->captcha_enabled,
+					'spam_protection'   => $src->spam_protection,
+					'autoreply_enabled' => $src->autoreply_enabled,
+					'autoreply_subject' => $src->autoreply_subject,
+					'autoreply_body'    => $src->autoreply_body,
+					'success_message'   => $src->success_message,
+					'store_ip'          => $src->store_ip,
+					'created_at'        => current_time( 'mysql' ),
+				),
+				array( '%s', '%s', '%s', '%s', '%d', '%d', '%d', '%s', '%s', '%s', '%d', '%s' )
+			);
+			$new_id = (int) $wpdb->insert_id;
+
+			foreach ( aqm_get_fields( $src->id ) as $sf ) {
+				$wpdb->insert(
+					aqm_table( 'form_fields' ),
+					array(
+						'form_id'     => $new_id,
+						'field_key'   => $sf->field_key,
+						'label'       => $sf->label,
+						'field_type'  => $sf->field_type,
+						'placeholder' => $sf->placeholder,
+						'required'    => $sf->required,
+						'enabled'     => $sf->enabled,
+						'sort_order'  => $sf->sort_order,
+					),
+					array( '%d', '%s', '%s', '%s', '%s', '%d', '%d', '%d' )
+				);
+				$new_field_id = (int) $wpdb->insert_id;
+
+				if ( in_array( $sf->field_type, array( 'select', 'combobox' ), true ) ) {
+					foreach ( aqm_get_options( $sf->id ) as $opt ) {
+						$wpdb->insert(
+							aqm_table( 'field_options' ),
+							array(
+								'field_id'   => $new_field_id,
+								'label'      => $opt->label,
+								'sort_order' => $opt->sort_order,
+							),
+							array( '%d', '%s', '%d' )
+						);
+					}
+				}
+			}
+		}
+
+		wp_safe_redirect( add_query_arg( 'aqm_msg', 'form_duplicated', $base ) );
+		exit;
+	}
+
+	$forms = aqm_get_forms();
+	?>
+	<div class="wrap">
+		<h1 style="display:flex;align-items:center;gap:16px">
+			All Forms
+			<span style="font-size:13px;font-weight:400;color:#555"><?php echo esc_html( count( $forms ) ); ?> form(s) created</span>
+		</h1>
+
+		<?php aqm_render_notice(); ?>
+
+		<div class="aqm-box" style="max-width:500px;background:#f9f9f9">
+			<h3 style="margin-top:0">Create a New Form</h3>
+			<form method="post" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+				<?php wp_nonce_field( 'aqm_create_form', 'aqm_new_form_nonce' ); ?>
+				<label class="screen-reader-text" for="new_form_name">Form name</label>
+				<input type="text" id="new_form_name" name="new_form_name" class="regular-text"
+					placeholder="e.g. Event Registration, Volunteer Signup..." style="flex:1;min-width:220px" maxlength="120" required>
+				<?php submit_button( 'Create Form', 'primary', 'submit', false ); ?>
+			</form>
+			<p class="description" style="margin-top:8px">Each new form starts with default fields. Customise them in the Form Builder.</p>
+		</div>
+
+		<?php if ( $forms ) : ?>
+			<?php
+			foreach ( $forms as $form ) :
+				$builder_url = admin_url( 'admin.php?page=aqm-form-builder&form_id=' . $form->id );
+				$subs_url    = admin_url( 'admin.php?page=aqm-submissions&form_id=' . $form->id );
+				$del_url     = wp_nonce_url( add_query_arg( array( 'action' => 'delete_form', 'id' => $form->id ), $base ), 'aqm_del_form_' . $form->id );
+				$dup_url     = wp_nonce_url( add_query_arg( array( 'action' => 'duplicate_form', 'id' => $form->id ), $base ), 'aqm_dup_form_' . $form->id );
+				$field_count = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM ' . aqm_table( 'form_fields' ) . ' WHERE form_id = %d', $form->id ) ); // phpcs:ignore
+				$entry_count = (int) $wpdb->get_var( $wpdb->prepare( 'SELECT COUNT(*) FROM ' . aqm_table( 'contact_entries' ) . ' WHERE form_id = %d', $form->id ) ); // phpcs:ignore
+				$shortcode   = '[aqm_form id="' . $form->id . '"]';
+				?>
+				<div class="aqm-form-card">
+					<div class="aqm-form-id-badge"><?php echo esc_html( $form->id ); ?></div>
+					<div class="aqm-form-card-body">
+						<h3><?php echo esc_html( $form->form_name ); ?></h3>
+						<p>
+							<?php echo esc_html( $field_count ); ?> field(s) &nbsp;&middot;&nbsp;
+							<?php echo esc_html( $entry_count ); ?> submission(s) &nbsp;&middot;&nbsp;
+							CAPTCHA: <?php echo $form->captcha_enabled ? '<strong style="color:#1e5c29">ON</strong>' : '<span style="color:#666">OFF</span>'; ?> &nbsp;&middot;&nbsp;
+							Notify: <em><?php echo esc_html( $form->notify_email ? $form->notify_email : 'not set' ); ?></em>
+						</p>
+						<p style="margin-top:8px">
+							Shortcode:
+							<span class="aqm-shortcode-box" title="Click to copy"
+								onclick="navigator.clipboard.writeText('<?php echo esc_js( $shortcode ); ?>');var me=this;me.textContent='Copied!';setTimeout(function(){me.textContent='<?php echo esc_js( $shortcode ); ?>';},1500)">
+								<?php echo esc_html( $shortcode ); ?>
+							</span>
+							<span style="font-size:12px;color:#666;margin-left:8px">paste this on any page or post</span>
+						</p>
+						<div class="aqm-form-card-actions">
+							<a href="<?php echo esc_url( $builder_url ); ?>" class="button button-primary">Form Builder</a>
+							<a href="<?php echo esc_url( $subs_url ); ?>" class="button">View Submissions</a>
+							<a href="<?php echo esc_url( $dup_url ); ?>" class="button">Duplicate</a>
+							<a href="<?php echo esc_url( $del_url ); ?>" class="button" style="color:#b32d2e;border-color:#b32d2e"
+								onclick="return confirm('Delete the form &quot;<?php echo esc_js( $form->form_name ); ?>&quot; and ALL its submissions? This cannot be undone.')">Delete</a>
+						</div>
+					</div>
+				</div>
+			<?php endforeach; ?>
+		<?php else : ?>
+			<p>No forms yet. Create one above.</p>
+		<?php endif; ?>
+	</div>
+	<?php
+}
+
+/* ══════════════════════════════════════════════════════════════
+   10. ADMIN PAGE - Form Builder
+   ══════════════════════════════════════════════════════════════ */
+
+function aqm_field_types() {
+	return array(
+		'text'     => 'Text',
+		'email'    => 'Email (validated)',
+		'tel'      => 'Telephone',
+		'number'   => 'Number',
+		'url'      => 'Website URL',
+		'date'     => 'Date Picker',
+		'select'   => 'Dropdown (pick only)',
+		'combobox' => 'Combobox (pick OR type freely)',
+		'textarea' => 'Text Area',
+		'checkbox' => 'Checkbox',
+	);
+}
+
+function aqm_admin_builder_page() {
+	if ( ! current_user_can( 'manage_options' ) ) {
+		wp_die( 'You do not have permission to view this page.' );
+	}
+
+	global $wpdb;
+
+	$form_id = (int) ( $_GET['form_id'] ?? 0 );
+	$form    = $form_id ? aqm_get_form( $form_id ) : null;
+
+	if ( ! $form ) {
+		echo '<div class="wrap"><div class="notice notice-error"><p>No form selected. <a href="' . esc_url( admin_url( 'admin.php?page=aqm-forms' ) ) . '">Back to All Forms</a></p></div></div>';
+		return;
+	}
+
+	$ftable = aqm_table( 'form_fields' );
+	$otable = aqm_table( 'field_options' );
+	$base   = admin_url( 'admin.php?page=aqm-form-builder&form_id=' . $form_id );
+
+	$redirect = static function ( $code, $extra = array() ) use ( $base ) {
+		wp_safe_redirect( add_query_arg( array_merge( array( 'aqm_msg' => $code ), $extra ), $base ) );
+		exit;
+	};
+
+	/* ---- Save form settings ---- */
+	if ( isset( $_POST['aqm_settings_nonce'] ) ) {
+		check_admin_referer( 'aqm_save_settings_' . $form_id, 'aqm_settings_nonce' );
+
+		$email = isset( $_POST['notify_email'] ) ? sanitize_email( wp_unslash( $_POST['notify_email'] ) ) : '';
+
+		$cc_raw = isset( $_POST['notify_cc'] ) ? sanitize_text_field( wp_unslash( $_POST['notify_cc'] ) ) : '';
+		$cc     = array();
+		foreach ( array_filter( array_map( 'trim', explode( ',', $cc_raw ) ) ) as $candidate ) {
+			$candidate = sanitize_email( $candidate );
+			if ( is_email( $candidate ) ) {
+				$cc[] = $candidate;
+			}
+		}
+
+		$wpdb->update(
+			aqm_table( 'forms' ),
+			array(
+				'form_name'         => isset( $_POST['form_name'] ) ? sanitize_text_field( wp_unslash( $_POST['form_name'] ) ) : $form->form_name,
+				'notify_email'      => is_email( $email ) ? $email : get_option( 'admin_email' ),
+				'notify_cc'         => implode( ', ', $cc ),
+				'email_subject'     => isset( $_POST['email_subject'] ) ? sanitize_text_field( wp_unslash( $_POST['email_subject'] ) ) : '',
+				'success_message'   => isset( $_POST['success_message'] ) ? sanitize_text_field( wp_unslash( $_POST['success_message'] ) ) : '',
+				'autoreply_subject' => isset( $_POST['autoreply_subject'] ) ? sanitize_text_field( wp_unslash( $_POST['autoreply_subject'] ) ) : '',
+				'autoreply_body'    => isset( $_POST['autoreply_body'] ) ? sanitize_textarea_field( wp_unslash( $_POST['autoreply_body'] ) ) : '',
+				'captcha_enabled'   => empty( $_POST['captcha_enabled'] ) ? 0 : 1,
+				'spam_protection'   => empty( $_POST['spam_protection'] ) ? 0 : 1,
+				'store_ip'          => empty( $_POST['store_ip'] ) ? 0 : 1,
+				'autoreply_enabled' => empty( $_POST['autoreply_enabled'] ) ? 0 : 1,
+			),
+			array( 'id' => $form_id ),
+			array( '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%d', '%d', '%d' ),
+			array( '%d' )
+		);
+
+		$redirect( 'settings_saved' );
+	}
+
+	/* ---- Field and option actions ---- */
+	$action = isset( $_GET['action'] ) ? sanitize_key( wp_unslash( $_GET['action'] ) ) : '';
+
+	if ( 'delete_field' === $action && isset( $_GET['id'] ) ) {
+		$fld = (int) $_GET['id'];
+		check_admin_referer( 'aqm_del_field_' . $fld );
+		$wpdb->delete( $ftable, array( 'id' => $fld, 'form_id' => $form_id ), array( '%d', '%d' ) );
+		$wpdb->delete( $otable, array( 'field_id' => $fld ), array( '%d' ) );
+		$redirect( 'field_deleted' );
+	}
+
+	if ( 'toggle_field' === $action && isset( $_GET['id'] ) ) {
+		$fld = (int) $_GET['id'];
+		check_admin_referer( 'aqm_tog_fld_' . $fld );
+		$cur = (int) $wpdb->get_var( $wpdb->prepare( "SELECT enabled FROM $ftable WHERE id = %d AND form_id = %d", $fld, $form_id ) ); // phpcs:ignore
+		$wpdb->update( $ftable, array( 'enabled' => $cur ? 0 : 1 ), array( 'id' => $fld, 'form_id' => $form_id ), array( '%d' ), array( '%d', '%d' ) );
+		$redirect( $cur ? 'field_hidden' : 'field_shown' );
+	}
+
+	if ( 'toggle_req' === $action && isset( $_GET['id'] ) ) {
+		$fld = (int) $_GET['id'];
+		check_admin_referer( 'aqm_tog_req_' . $fld );
+		$cur = (int) $wpdb->get_var( $wpdb->prepare( "SELECT required FROM $ftable WHERE id = %d AND form_id = %d", $fld, $form_id ) ); // phpcs:ignore
+		$wpdb->update( $ftable, array( 'required' => $cur ? 0 : 1 ), array( 'id' => $fld, 'form_id' => $form_id ), array( '%d' ), array( '%d', '%d' ) );
+		$redirect( $cur ? 'field_optional' : 'field_required' );
+	}
+
+	if ( 'delete_option' === $action && isset( $_GET['id'] ) ) {
+		$oid = (int) $_GET['id'];
+		check_admin_referer( 'aqm_del_opt_' . $oid );
+		$show = (int) ( $_GET['options_for'] ?? 0 );
+		$wpdb->delete( $otable, array( 'id' => $oid ), array( '%d' ) );
+		$redirect( 'option_deleted', array( 'options_for' => $show ) );
+	}
+
+	/* ---- Save field ---- */
+	if ( isset( $_POST['aqm_field_nonce'] ) ) {
+		check_admin_referer( 'aqm_save_field_' . $form_id, 'aqm_field_nonce' );
+
+		$label = isset( $_POST['aqm_field_label'] ) ? sanitize_text_field( wp_unslash( $_POST['aqm_field_label'] ) ) : '';
+		$type  = isset( $_POST['aqm_field_type'] ) ? sanitize_key( wp_unslash( $_POST['aqm_field_type'] ) ) : 'text';
+		$ph    = isset( $_POST['aqm_field_placeholder'] ) ? sanitize_text_field( wp_unslash( $_POST['aqm_field_placeholder'] ) ) : '';
+		$req   = empty( $_POST['aqm_field_required'] ) ? 0 : 1;
+		$edit  = (int) ( $_POST['aqm_edit_id'] ?? 0 );
+
+		// Only field types this plugin can actually render.
+		if ( ! array_key_exists( $type, aqm_field_types() ) ) {
+			$type = 'text';
+		}
+
+		if ( '' === $label ) {
+			$redirect( 'field_empty' );
+		}
+
+		if ( $edit ) {
+			$wpdb->update(
+				$ftable,
+				array(
+					'label'       => $label,
+					'field_type'  => $type,
+					'placeholder' => $ph,
+					'required'    => $req,
+				),
+				array( 'id' => $edit, 'form_id' => $form_id ),
+				array( '%s', '%s', '%s', '%d' ),
+				array( '%d', '%d' )
+			);
+		} else {
+			$max = (int) $wpdb->get_var( $wpdb->prepare( "SELECT MAX(sort_order) FROM $ftable WHERE form_id = %d", $form_id ) ); // phpcs:ignore
+			$wpdb->insert(
+				$ftable,
+				array(
+					'form_id'     => $form_id,
+					'field_key'   => aqm_unique_key( $label, $form_id ),
+					'label'       => $label,
+					'field_type'  => $type,
+					'placeholder' => $ph,
+					'required'    => $req,
+					'enabled'     => 1,
+					'sort_order'  => $max + 1,
+				),
+				array( '%d', '%s', '%s', '%s', '%s', '%d', '%d', '%d' )
+			);
+		}
+
+		$redirect( 'field_saved' );
+	}
+
+	/* ---- Save option ---- */
+	if ( isset( $_POST['aqm_option_nonce'] ) ) {
+		check_admin_referer( 'aqm_save_option_' . $form_id, 'aqm_option_nonce' );
+
+		$label = isset( $_POST['aqm_opt_label'] ) ? sanitize_text_field( wp_unslash( $_POST['aqm_opt_label'] ) ) : '';
+		$fld   = (int) ( $_POST['aqm_opt_field_id'] ?? 0 );
+		$oid   = (int) ( $_POST['aqm_opt_edit_id'] ?? 0 );
+
+		if ( '' === $label ) {
+			$redirect( 'option_empty', array( 'options_for' => $fld ) );
+		}
+
+		if ( $oid ) {
+			$wpdb->update( $otable, array( 'label' => $label ), array( 'id' => $oid ), array( '%s' ), array( '%d' ) );
+		} else {
+			$max = (int) $wpdb->get_var( $wpdb->prepare( "SELECT MAX(sort_order) FROM $otable WHERE field_id = %d", $fld ) ); // phpcs:ignore
+			$wpdb->insert( $otable, array( 'field_id' => $fld, 'label' => $label, 'sort_order' => $max + 1 ), array( '%d', '%s', '%d' ) );
+		}
+
+		$redirect( 'option_saved', array( 'options_for' => $fld ) );
+	}
+
+	/* ---- View state ---- */
+	$show_opts_for = (int) ( $_GET['options_for'] ?? 0 );
+	$all_fields    = aqm_get_fields( $form_id );
+
+	$editing_field = null;
+	if ( 'edit_field' === $action && isset( $_GET['id'] ) ) {
+		$editing_field = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM $ftable WHERE id = %d AND form_id = %d", (int) $_GET['id'], $form_id ) ); // phpcs:ignore
+	}
+
+	$editing_opt = null;
+	if ( 'edit_option' === $action && isset( $_GET['id'] ) ) {
+		$editing_opt = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM $otable WHERE id = %d", (int) $_GET['id'] ) ); // phpcs:ignore
+		if ( $editing_opt ) {
+			$show_opts_for = (int) $editing_opt->field_id;
+		}
+	}
+	?>
+	<div class="wrap">
+		<h1>
+			Form Builder &mdash;
+			<em style="font-weight:400;color:#555"><?php echo esc_html( $form->form_name ); ?></em>
+			<a href="<?php echo esc_url( admin_url( 'admin.php?page=aqm-forms' ) ); ?>" class="page-title-action">All Forms</a>
+			<span class="aqm-save-status" id="aqm-order-status"></span>
+		</h1>
+
+		<p style="background:#e8f4fd;border:1px solid #b8d9f5;border-radius:4px;padding:8px 14px;display:inline-block;font-family:monospace;font-size:14px;color:#1a4b6e">
+			Shortcode: <strong>[aqm_form id="<?php echo esc_html( $form_id ); ?>"]</strong>
+		</p>
+
+		<?php aqm_render_notice(); ?>
+
+		<div style="display:flex;gap:28px;align-items:flex-start;flex-wrap:wrap;margin-top:16px">
+
+			<div style="flex:1;min-width:520px">
+
+				<details class="aqm-box" style="padding:0">
+					<summary style="padding:14px 20px;cursor:pointer;font-weight:600;font-size:14px">
+						Form Settings <span style="font-weight:400;color:#666;font-size:12px">(notification email, subject, auto-reply, CAPTCHA)</span>
+					</summary>
+					<div style="padding:0 20px 20px">
+						<form method="post">
+							<?php wp_nonce_field( 'aqm_save_settings_' . $form_id, 'aqm_settings_nonce' ); ?>
+							<table class="form-table" style="max-width:620px">
+								<tr>
+									<th style="width:170px"><label for="fs_name">Form Name</label></th>
+									<td><input type="text" id="fs_name" name="form_name" value="<?php echo esc_attr( $form->form_name ); ?>" maxlength="120" required style="width:100%"></td>
+								</tr>
+								<tr>
+									<th><label for="fs_email">Notification Email</label></th>
+									<td>
+										<input type="email" id="fs_email" name="notify_email" value="<?php echo esc_attr( $form->notify_email ); ?>" style="width:100%">
+										<p class="description">Submissions for this form are sent here.</p>
+									</td>
+								</tr>
+								<tr>
+									<th><label for="fs_cc">Cc (optional)</label></th>
+									<td>
+										<input type="text" id="fs_cc" name="notify_cc" value="<?php echo esc_attr( $form->notify_cc ); ?>" style="width:100%">
+										<p class="description">Comma-separated. Invalid addresses are dropped when you save.</p>
+									</td>
+								</tr>
+								<tr>
+									<th><label for="fs_subject">Email Subject</label></th>
+									<td><input type="text" id="fs_subject" name="email_subject" value="<?php echo esc_attr( $form->email_subject ); ?>" maxlength="200" style="width:100%"></td>
+								</tr>
+								<tr>
+									<th><label for="fs_success">Thank-you message</label></th>
+									<td>
+										<input type="text" id="fs_success" name="success_message" value="<?php echo esc_attr( $form->success_message ); ?>" maxlength="255" style="width:100%">
+										<p class="description">Shown after a successful submission. <code>{name}</code> and <code>{comma_name}</code> are available.</p>
+									</td>
+								</tr>
+								<tr>
+									<th>Auto-reply</th>
+									<td>
+										<label><input type="checkbox" name="autoreply_enabled" value="1" <?php checked( 1, (int) $form->autoreply_enabled ); ?>> Send a confirmation email to the person who wrote in</label>
+										<p style="margin-top:10px">
+											<label for="fs_ar_subject">Subject</label><br>
+											<input type="text" id="fs_ar_subject" name="autoreply_subject" value="<?php echo esc_attr( $form->autoreply_subject ); ?>" maxlength="200" style="width:100%">
+										</p>
+										<p>
+											<label for="fs_ar_body">Message</label><br>
+											<textarea id="fs_ar_body" name="autoreply_body" rows="7" style="width:100%"><?php echo esc_textarea( $form->autoreply_body ); ?></textarea>
+										</p>
+										<p class="description">Placeholders: <code>{name}</code> <code>{form_name}</code> <code>{submission}</code> <code>{site_name}</code>. Sent to the first valid email field on the form.</p>
+									</td>
+								</tr>
+								<tr>
+									<th>Protection</th>
+									<td>
+										<label><input type="checkbox" name="captcha_enabled" value="1" <?php checked( 1, (int) $form->captcha_enabled ); ?>> Show the maths CAPTCHA</label><br>
+										<label><input type="checkbox" name="spam_protection" value="1" <?php checked( 1, (int) $form->spam_protection ); ?>> Silent traps (honeypot and timing check, invisible to visitors)</label><br>
+										<label><input type="checkbox" name="store_ip" value="1" <?php checked( 1, (int) $form->store_ip ); ?>> Store the sender's IP address with each submission</label>
+									</td>
+								</tr>
+							</table>
+							<?php submit_button( 'Save Settings', 'primary', 'submit', false ); ?>
+						</form>
+					</div>
+				</details>
+
+				<div class="aqm-box">
+					<h2 style="margin-top:0;font-size:14px;text-transform:uppercase;letter-spacing:.5px;color:#444">
+						Fields <span style="font-weight:400;text-transform:none;color:#666;font-size:12px">drag to reorder</span>
+					</h2>
+					<table class="widefat" style="border:none">
+						<thead>
+							<tr>
+								<th style="width:28px"><span class="screen-reader-text">Reorder</span></th>
+								<th>Label / Key</th>
+								<th style="width:85px">Type</th>
+								<th style="width:72px">Visible</th>
+								<th style="width:88px">Required</th>
+								<th>Actions</th>
+							</tr>
+						</thead>
+						<tbody id="aqm-fields-sortable">
+						<?php
+						foreach ( $all_fields as $f ) :
+							$eu = add_query_arg( array( 'action' => 'edit_field', 'id' => $f->id ), $base );
+							$du = wp_nonce_url( add_query_arg( array( 'action' => 'delete_field', 'id' => $f->id ), $base ), 'aqm_del_field_' . $f->id );
+							$tu = wp_nonce_url( add_query_arg( array( 'action' => 'toggle_field', 'id' => $f->id ), $base ), 'aqm_tog_fld_' . $f->id );
+							$ru = wp_nonce_url( add_query_arg( array( 'action' => 'toggle_req', 'id' => $f->id ), $base ), 'aqm_tog_req_' . $f->id );
+							$ou = add_query_arg( 'options_for', $f->id, $base );
+							?>
+							<tr data-id="<?php echo esc_attr( $f->id ); ?>" class="<?php echo $f->enabled ? '' : 'aqm-disabled'; ?>">
+								<td><span class="aqm-drag-handle" title="Drag to reorder" aria-hidden="true">&#9776;</span></td>
+								<td>
+									<strong><?php echo esc_html( $f->label ); ?></strong><br>
+									<code style="font-size:11px;color:#767676"><?php echo esc_html( $f->field_key ); ?></code>
+								</td>
+								<td>
+									<span class="<?php echo 'combobox' === $f->field_type ? 'aqm-type-badge-combobox' : 'aqm-type-badge'; ?>"><?php echo esc_html( $f->field_type ); ?></span>
+								</td>
+								<td>
+									<a href="<?php echo esc_url( $tu ); ?>" class="aqm-badge <?php echo $f->enabled ? 'aqm-badge-on' : 'aqm-badge-off'; ?>"><?php echo $f->enabled ? 'ON' : 'OFF'; ?></a>
+								</td>
+								<td>
+									<a href="<?php echo esc_url( $ru ); ?>" class="aqm-badge <?php echo $f->required ? 'aqm-badge-req' : 'aqm-badge-opt'; ?>"><?php echo $f->required ? 'Req' : 'Opt'; ?></a>
+								</td>
+								<td>
+									<div class="aqm-tbl-actions">
+										<a href="<?php echo esc_url( $eu ); ?>" class="button button-small">Edit</a>
+										<?php if ( in_array( $f->field_type, array( 'select', 'combobox' ), true ) ) : ?>
+											<a href="<?php echo esc_url( $ou ); ?>" class="button button-small" style="color:#0073aa;border-color:#0073aa">Options</a>
+										<?php endif; ?>
+										<a href="<?php echo esc_url( $du ); ?>" class="button button-small" style="color:#b32d2e;border-color:#b32d2e"
+											onclick="return confirm('Delete the field &quot;<?php echo esc_js( $f->label ); ?>&quot;?')">Del</a>
+									</div>
+								</td>
+							</tr>
+						<?php endforeach; ?>
+						</tbody>
+					</table>
+				</div>
+
+				<?php
+				if ( $show_opts_for ) :
+					$opt_field = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM $ftable WHERE id = %d AND form_id = %d", $show_opts_for, $form_id ) ); // phpcs:ignore
+					if ( $opt_field ) :
+						$options = aqm_get_options( $show_opts_for );
+						?>
+						<div class="aqm-box" style="border-color:#0073aa">
+							<h2 style="margin-top:0;font-size:14px;color:#0073aa;text-transform:uppercase;letter-spacing:.5px">
+								<?php echo 'combobox' === $opt_field->field_type ? 'Combobox Suggestions' : 'Dropdown Options'; ?>
+								&mdash; <em><?php echo esc_html( $opt_field->label ); ?></em>
+								<span class="aqm-save-status" id="aqm-opt-order-status"></span>
+							</h2>
+
+							<?php if ( 'combobox' === $opt_field->field_type ) : ?>
+								<div style="background:#f0e8fe;border:1px solid #c4a8f5;border-radius:4px;padding:8px 14px;margin-bottom:14px;font-size:13px;color:#4a1990">
+									<strong>Combobox mode:</strong> these appear as suggestions. Visitors can pick one <em>or</em> type their own value.
+								</div>
+							<?php endif; ?>
+
+							<ul id="aqm-options-sortable">
+							<?php
+							foreach ( $options as $opt ) :
+								$eou = add_query_arg( array( 'action' => 'edit_option', 'id' => $opt->id, 'options_for' => $show_opts_for ), $base );
+								$dou = wp_nonce_url( add_query_arg( array( 'action' => 'delete_option', 'id' => $opt->id, 'options_for' => $show_opts_for ), $base ), 'aqm_del_opt_' . $opt->id );
+								?>
+								<li data-id="<?php echo esc_attr( $opt->id ); ?>">
+									<span class="aqm-drag-handle" aria-hidden="true">&#9776;</span>
+									<span style="flex:1"><?php echo esc_html( $opt->label ); ?></span>
+									<a href="<?php echo esc_url( $eou ); ?>" class="button button-small">Edit</a>
+									<a href="<?php echo esc_url( $dou ); ?>" class="button button-small" style="color:#b32d2e;border-color:#b32d2e"
+										onclick="return confirm('Delete this option?')">Del</a>
+								</li>
+							<?php endforeach; ?>
+							</ul>
+
+							<div style="margin-top:14px;padding-top:14px;border-top:1px solid #dde">
+								<strong><?php echo $editing_opt ? 'Edit Option' : 'Add Option'; ?></strong>
+								<form method="post" style="display:flex;gap:10px;align-items:center;margin-top:8px;flex-wrap:wrap">
+									<?php wp_nonce_field( 'aqm_save_option_' . $form_id, 'aqm_option_nonce' ); ?>
+									<input type="hidden" name="aqm_opt_field_id" value="<?php echo esc_attr( $show_opts_for ); ?>">
+									<?php if ( $editing_opt ) : ?>
+										<input type="hidden" name="aqm_opt_edit_id" value="<?php echo esc_attr( $editing_opt->id ); ?>">
+									<?php endif; ?>
+									<label class="screen-reader-text" for="aqm_opt_label">Option label</label>
+									<input type="text" id="aqm_opt_label" name="aqm_opt_label" maxlength="120"
+										value="<?php echo esc_attr( $editing_opt ? $editing_opt->label : '' ); ?>"
+										placeholder="Option label..." style="flex:1;min-width:180px" required>
+									<?php submit_button( $editing_opt ? 'Update' : 'Add Option', 'primary', 'submit', false ); ?>
+									<?php if ( $editing_opt ) : ?>
+										<a href="<?php echo esc_url( add_query_arg( 'options_for', $show_opts_for, $base ) ); ?>" class="button">Cancel</a>
+									<?php endif; ?>
+								</form>
+							</div>
+						</div>
+						<?php
+					endif;
+				endif;
+				?>
+
+			</div>
+
+			<div style="flex:0 0 265px">
+				<div class="aqm-box">
+					<h2 style="margin-top:0;font-size:14px;text-transform:uppercase;letter-spacing:.5px;color:#444">
+						<?php echo $editing_field ? 'Edit Field' : 'Add Field'; ?>
+					</h2>
+					<form method="post">
+						<?php wp_nonce_field( 'aqm_save_field_' . $form_id, 'aqm_field_nonce' ); ?>
+						<?php if ( $editing_field ) : ?>
+							<input type="hidden" name="aqm_edit_id" value="<?php echo esc_attr( $editing_field->id ); ?>">
+						<?php endif; ?>
+						<p>
+							<label for="aqm_field_label"><strong>Label <span style="color:#9a6c1f">*</span></strong></label>
+							<input type="text" id="aqm_field_label" name="aqm_field_label" maxlength="120"
+								value="<?php echo esc_attr( $editing_field ? $editing_field->label : '' ); ?>"
+								placeholder="e.g. Company Name" style="width:100%;margin-top:4px" required>
+						</p>
+						<p>
+							<label for="aqm_field_type"><strong>Field Type</strong></label>
+							<select id="aqm_field_type" name="aqm_field_type" style="width:100%;margin-top:4px">
+								<?php
+								$current = $editing_field ? $editing_field->field_type : 'text';
+								foreach ( aqm_field_types() as $value => $label ) :
+									?>
+									<option value="<?php echo esc_attr( $value ); ?>" <?php selected( $current, $value ); ?>><?php echo esc_html( $label ); ?></option>
+								<?php endforeach; ?>
+							</select>
+						</p>
+						<p>
+							<label for="aqm_field_placeholder"><strong>Placeholder</strong></label>
+							<input type="text" id="aqm_field_placeholder" name="aqm_field_placeholder" maxlength="200"
+								value="<?php echo esc_attr( $editing_field ? $editing_field->placeholder : '' ); ?>"
+								placeholder="Hint text..." style="width:100%;margin-top:4px">
+						</p>
+						<p>
+							<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:600">
+								<input type="checkbox" name="aqm_field_required" value="1" <?php checked( $editing_field ? (int) $editing_field->required : 1, 1 ); ?>>
+								Mark as Required
+							</label>
+						</p>
+						<p style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
+							<?php submit_button( $editing_field ? 'Update' : 'Add Field', 'primary', 'submit', false ); ?>
+							<?php if ( $editing_field ) : ?>
+								<a href="<?php echo esc_url( $base ); ?>" class="button">Cancel</a>
+							<?php endif; ?>
+						</p>
+					</form>
+				</div>
+
+				<div class="aqm-box" style="font-size:12px;background:#fafafa">
+					<?php foreach ( aqm_field_types() as $type => $label ) : ?>
+						<div style="display:flex;gap:8px;margin-bottom:5px;align-items:center">
+							<span class="aqm-type-badge" style="min-width:60px;text-align:center"><?php echo esc_html( $type ); ?></span>
+							<span style="color:#555"><?php echo esc_html( $label ); ?></span>
+						</div>
+					<?php endforeach; ?>
+				</div>
+			</div>
+
+		</div>
+	</div>
+	<?php
+}
+
+/* ══════════════════════════════════════════════════════════════
+   11. ADMIN PAGE - Submissions
+   ══════════════════════════════════════════════════════════════ */
+
+function aqm_admin_submissions_page() {
+	if ( ! current_user_can( 'manage_options' ) ) {
+		wp_die( 'You do not have permission to view this page.' );
+	}
+
+	global $wpdb;
+
+	$entries_table = aqm_table( 'contact_entries' );
+	$base          = admin_url( 'admin.php?page=aqm-submissions' );
+	$form_id       = (int) ( $_GET['form_id'] ?? 0 );
+	$search        = isset( $_GET['s'] ) ? sanitize_text_field( wp_unslash( $_GET['s'] ) ) : '';
+
+	/* ---- Bulk delete, then redirect so a refresh cannot repeat it ---- */
+	if ( isset( $_POST['aqm_bulk_nonce'] ) ) {
+		check_admin_referer( 'aqm_bulk_entries', 'aqm_bulk_nonce' );
+
+		$ids  = array_values( array_filter( array_map( 'intval', (array) wp_unslash( $_POST['entry_ids'] ?? array() ) ) ) );
+		$act  = isset( $_POST['bulk_action'] ) ? sanitize_key( wp_unslash( $_POST['bulk_action'] ) ) : '';
+		$code = 'nothing_picked';
+
+		if ( 'delete' === $act && $ids ) {
+			$placeholders = implode( ',', array_fill( 0, count( $ids ), '%d' ) );
+			$deleted      = $wpdb->query( $wpdb->prepare( "DELETE FROM $entries_table WHERE id IN ($placeholders)", $ids ) ); // phpcs:ignore
+
+			if ( false === $deleted ) {
+				error_log( 'AQM Contact Form: bulk delete failed - ' . $wpdb->last_error );
+				$code = 'delete_failed';
+			} else {
+				$code = 'entries_deleted';
+			}
+		}
+
+		wp_safe_redirect(
+			add_query_arg(
+				array(
+					'page'    => 'aqm-submissions',
+					'form_id' => $form_id,
+					's'       => $search,
+					'aqm_msg' => $code,
+				),
+				admin_url( 'admin.php' )
+			)
+		);
+		exit;
+	}
+
+	$forms = aqm_get_forms();
+
+	/* ---- Query ---- */
 	$where  = array( '1=1' );
 	$params = array();
 
-	if ( '' !== $search ) {
-		$like    = '%' . $wpdb->esc_like( $search ) . '%';
-		$where[] = '(name LIKE %s OR email LIKE %s OR phone LIKE %s OR message LIKE %s)';
-		array_push( $params, $like, $like, $like, $like );
+	if ( $form_id ) {
+		$where[]  = 'form_id = %d';
+		$params[] = $form_id;
 	}
-	if ( $type_id ) {
-		$where[]  = 'event_type_id = %d';
-		$params[] = $type_id;
+	if ( '' !== $search ) {
+		$like     = '%' . $wpdb->esc_like( $search ) . '%';
+		$where[]  = '(form_data LIKE %s OR form_name LIKE %s)';
+		$params[] = $like;
+		$params[] = $like;
 	}
 	$where_sql = implode( ' AND ', $where );
 
-	$count_sql = "SELECT COUNT(*) FROM $table WHERE $where_sql";
+	$count_sql = "SELECT COUNT(*) FROM $entries_table WHERE $where_sql";
 	$total     = (int) ( $params
-		? $wpdb->get_var( $wpdb->prepare( $count_sql, $params ) ) // phpcs:ignore WordPress.DB.PreparedSQL
-		: $wpdb->get_var( $count_sql ) ); // phpcs:ignore WordPress.DB.PreparedSQL
+		? $wpdb->get_var( $wpdb->prepare( $count_sql, $params ) ) // phpcs:ignore
+		: $wpdb->get_var( $count_sql ) ); // phpcs:ignore
 
-	// Clamp the page AFTER counting, so a delete that shrinks the result set
-	// cannot strand the admin on an empty "No entries found" page.
+	// v7.0.0 selected every row with no LIMIT. Fine at fifty submissions,
+	// a blank screen at twenty thousand.
+	$per_page    = 25;
 	$total_pages = max( 1, (int) ceil( $total / $per_page ) );
-	$paged       = min( $paged, $total_pages );
+	$paged       = min( max( 1, (int) ( $_GET['paged'] ?? 1 ) ), $total_pages );
 	$offset      = ( $paged - 1 ) * $per_page;
 
-	$list_sql = "SELECT * FROM $table WHERE $where_sql ORDER BY submitted_at DESC, id DESC LIMIT %d OFFSET %d";
-	$entries  = $wpdb->get_results( $wpdb->prepare( $list_sql, array_merge( $params, array( $per_page, $offset ) ) ) ); // phpcs:ignore WordPress.DB.PreparedSQL
-	$event_types = aqm_cf_get_event_types();
+	$entries = $wpdb->get_results( // phpcs:ignore
+		$wpdb->prepare(
+			"SELECT * FROM $entries_table WHERE $where_sql ORDER BY submitted_at DESC, id DESC LIMIT %d OFFSET %d",
+			array_merge( $params, array( $per_page, $offset ) )
+		)
+	);
+
+	$fields = $form_id ? aqm_get_fields( $form_id ) : array();
 
 	$export_url = wp_nonce_url(
 		add_query_arg(
 			array(
-				'action'        => 'aqm_cf_export',
-				's'             => $search,
-				'event_type_id' => $type_id,
+				'action'  => 'aqm_export_entries',
+				'form_id' => $form_id,
+				's'       => $search,
 			),
 			admin_url( 'admin-post.php' )
 		),
-		'aqm_cf_export'
+		'aqm_export_entries'
 	);
 	?>
 	<div class="wrap">
-		<h1 class="wp-heading-inline"><?php esc_html_e( 'Contact Form Entries', 'aqm-contact-form' ); ?></h1>
-		<a href="<?php echo esc_url( $export_url ); ?>" class="page-title-action"><?php esc_html_e( 'Export CSV', 'aqm-contact-form' ); ?></a>
+		<h1 class="wp-heading-inline">Submissions</h1>
+		<?php if ( $form_id ) : ?>
+			<a href="<?php echo esc_url( $export_url ); ?>" class="page-title-action">Export CSV</a>
+		<?php endif; ?>
 		<hr class="wp-header-end">
 
-		<?php if ( $notice ) : ?>
-			<div class="notice notice-success is-dismissible"><p><?php echo esc_html( $notice ); ?></p></div>
-		<?php endif; ?>
+		<?php aqm_render_notice(); ?>
 
-		<form method="get" style="margin:12px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-			<input type="hidden" name="page" value="aqm-contact-entries">
-			<label class="screen-reader-text" for="aqm-search"><?php esc_html_e( 'Search entries', 'aqm-contact-form' ); ?></label>
-			<input type="search" id="aqm-search" name="s" value="<?php echo esc_attr( $search ); ?>" placeholder="<?php esc_attr_e( 'Search name, email, message…', 'aqm-contact-form' ); ?>" style="min-width:260px">
-			<label class="screen-reader-text" for="aqm-type-filter"><?php echo esc_html( sprintf( /* translators: %s: the dropdown's configured name */ __( 'Filter by %s', 'aqm-contact-form' ), aqm_cf_field_label() ) ); ?></label>
-			<select name="event_type_id" id="aqm-type-filter">
-				<option value="0"><?php esc_html_e( 'All types', 'aqm-contact-form' ); ?></option>
-				<?php foreach ( $event_types as $type ) : ?>
-					<option value="<?php echo esc_attr( $type->id ); ?>" <?php selected( $type_id, (int) $type->id ); ?>><?php echo esc_html( $type->label ); ?></option>
-				<?php endforeach; ?>
-			</select>
-			<?php submit_button( __( 'Filter', 'aqm-contact-form' ), 'secondary', '', false ); ?>
-			<?php if ( '' !== $search || $type_id ) : ?>
-				<a class="button" href="<?php echo esc_url( admin_url( 'admin.php?page=aqm-contact-entries' ) ); ?>"><?php esc_html_e( 'Reset', 'aqm-contact-form' ); ?></a>
+		<div style="margin:16px 0;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+			<strong>Filter by form:</strong>
+			<a href="<?php echo esc_url( $base ); ?>" class="button <?php echo ! $form_id ? 'button-primary' : ''; ?>">All Forms</a>
+			<?php foreach ( $forms as $f ) : ?>
+				<a href="<?php echo esc_url( add_query_arg( 'form_id', $f->id, $base ) ); ?>" class="button <?php echo $form_id === (int) $f->id ? 'button-primary' : ''; ?>">
+					<?php echo esc_html( $f->form_name ); ?>
+				</a>
+			<?php endforeach; ?>
+		</div>
+
+		<form method="get" style="margin:12px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+			<input type="hidden" name="page" value="aqm-submissions">
+			<input type="hidden" name="form_id" value="<?php echo esc_attr( $form_id ); ?>">
+			<label class="screen-reader-text" for="aqm-search">Search submissions</label>
+			<input type="search" id="aqm-search" name="s" value="<?php echo esc_attr( $search ); ?>" placeholder="Search submitted data..." style="min-width:260px">
+			<?php submit_button( 'Search', 'secondary', '', false ); ?>
+			<?php if ( '' !== $search ) : ?>
+				<a class="button" href="<?php echo esc_url( add_query_arg( 'form_id', $form_id, $base ) ); ?>">Reset</a>
 			<?php endif; ?>
-			<span class="displaying-num" style="margin-left:auto">
-				<?php
-				printf(
-					/* translators: %s: number of entries */
-					esc_html( _n( '%s entry', '%s entries', $total, 'aqm-contact-form' ) ),
-					esc_html( number_format_i18n( $total ) )
-				);
-				?>
-			</span>
+			<span class="displaying-num" style="margin-left:auto"><?php echo esc_html( number_format_i18n( $total ) ); ?> submission(s)</span>
 		</form>
 
 		<form method="post">
-			<?php wp_nonce_field( 'aqm_cf_bulk_entries', 'aqm_bulk_nonce' ); ?>
+			<?php wp_nonce_field( 'aqm_bulk_entries', 'aqm_bulk_nonce' ); ?>
 			<div class="tablenav top">
 				<div class="alignleft actions bulkactions">
-					<label class="screen-reader-text" for="aqm-bulk"><?php esc_html_e( 'Bulk action', 'aqm-contact-form' ); ?></label>
+					<label class="screen-reader-text" for="aqm-bulk">Bulk action</label>
 					<select name="bulk_action" id="aqm-bulk">
-						<option value=""><?php esc_html_e( 'Bulk actions', 'aqm-contact-form' ); ?></option>
-						<option value="delete"><?php esc_html_e( 'Delete permanently', 'aqm-contact-form' ); ?></option>
+						<option value="">Bulk actions</option>
+						<option value="delete">Delete permanently</option>
 					</select>
-					<button type="submit" class="button action" onclick="return confirm('<?php echo esc_js( __( 'Delete the selected entries? This cannot be undone.', 'aqm-contact-form' ) ); ?>');"><?php esc_html_e( 'Apply', 'aqm-contact-form' ); ?></button>
+					<button type="submit" class="button action" onclick="return confirm('Delete the selected submissions? This cannot be undone.');">Apply</button>
 				</div>
 			</div>
 
-			<table class="widefat fixed striped">
+			<div style="overflow-x:auto">
+			<table class="widefat striped">
 				<thead>
 					<tr>
-						<td class="check-column"><input type="checkbox" onclick="var b=this.checked;this.closest('form').querySelectorAll('input[name=\'entry_ids[]\']').forEach(function(c){c.checked=b;});" aria-label="<?php esc_attr_e( 'Select all entries', 'aqm-contact-form' ); ?>"></td>
-						<th style="width:60px"><?php esc_html_e( 'ID', 'aqm-contact-form' ); ?></th>
-						<th style="width:15%"><?php esc_html_e( 'Name', 'aqm-contact-form' ); ?></th>
-						<th style="width:18%"><?php esc_html_e( 'Email', 'aqm-contact-form' ); ?></th>
-						<th style="width:12%"><?php esc_html_e( 'Phone', 'aqm-contact-form' ); ?></th>
-						<th style="width:15%"><?php echo esc_html( aqm_cf_field_label() ); ?></th>
-						<th><?php esc_html_e( 'Message', 'aqm-contact-form' ); ?></th>
-						<th style="width:140px"><?php esc_html_e( 'Date', 'aqm-contact-form' ); ?></th>
+						<td class="check-column"><input type="checkbox" aria-label="Select all"
+							onclick="var b=this.checked;this.closest('form').querySelectorAll('input[name=\'entry_ids[]\']').forEach(function(c){c.checked=b;});"></td>
+						<th style="width:50px">#</th>
+						<?php if ( ! $form_id ) : ?><th>Form</th><?php endif; ?>
+						<?php if ( $fields ) : ?>
+							<?php foreach ( $fields as $f ) : ?>
+								<th><?php echo esc_html( $f->label ); ?></th>
+							<?php endforeach; ?>
+						<?php else : ?>
+							<th>Submitted Data</th>
+						<?php endif; ?>
+						<th style="width:150px">Date</th>
+						<th style="width:110px">IP</th>
 					</tr>
 				</thead>
 				<tbody>
 				<?php if ( $entries ) : ?>
-					<?php foreach ( $entries as $entry ) : ?>
+					<?php
+					foreach ( $entries as $e ) :
+						$data = json_decode( $e->form_data, true );
+						$data = is_array( $data ) ? $data : array();
+						?>
 						<tr>
 							<th scope="row" class="check-column">
-								<input type="checkbox" name="entry_ids[]" value="<?php echo esc_attr( $entry->id ); ?>" aria-label="<?php echo esc_attr( sprintf( /* translators: %d: entry ID */ __( 'Select entry %d', 'aqm-contact-form' ), $entry->id ) ); ?>">
+								<input type="checkbox" name="entry_ids[]" value="<?php echo esc_attr( $e->id ); ?>" aria-label="Select submission <?php echo esc_attr( $e->id ); ?>">
 							</th>
-							<td><?php echo esc_html( $entry->id ); ?></td>
-							<td>
-								<strong><a href="<?php echo esc_url( admin_url( 'admin.php?page=aqm-contact-entries&action=view&id=' . $entry->id ) ); ?>"><?php echo esc_html( $entry->name ); ?></a></strong>
-							</td>
-							<td><a href="mailto:<?php echo esc_attr( $entry->email ); ?>"><?php echo esc_html( $entry->email ); ?></a></td>
-							<td><?php echo esc_html( $entry->phone ); ?></td>
-							<td><?php echo esc_html( $entry->event_type ); ?></td>
-							<td><?php echo esc_html( wp_trim_words( $entry->message, 18, '…' ) ); ?></td>
-							<td><?php echo esc_html( mysql2date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), $entry->submitted_at ) ); ?></td>
+							<td><?php echo esc_html( $e->id ); ?></td>
+							<?php if ( ! $form_id ) : ?>
+								<td style="font-size:12px;color:#555"><?php echo esc_html( $e->form_name ); ?></td>
+							<?php endif; ?>
+							<?php if ( $fields ) : ?>
+								<?php foreach ( $fields as $f ) : ?>
+									<td><?php echo esc_html( $data[ $f->field_key ] ?? '-' ); ?></td>
+								<?php endforeach; ?>
+							<?php else : ?>
+								<td style="font-size:12px;max-width:400px;white-space:pre-wrap"><?php
+									foreach ( $data as $k => $v ) {
+										echo esc_html( $k . ': ' . $v ) . "\n";
+									}
+								?></td>
+							<?php endif; ?>
+							<td><?php echo esc_html( mysql2date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), $e->submitted_at ) ); ?></td>
+							<td style="font-size:11px;color:#767676"><?php echo esc_html( $e->ip_address ); ?></td>
 						</tr>
 					<?php endforeach; ?>
 				<?php else : ?>
-					<tr><td colspan="8"><?php esc_html_e( 'No entries found.', 'aqm-contact-form' ); ?></td></tr>
+					<tr><td colspan="20">No submissions found.</td></tr>
 				<?php endif; ?>
 				</tbody>
 			</table>
+			</div>
 		</form>
 
 		<?php if ( $total_pages > 1 ) : ?>
@@ -1295,7 +2189,7 @@ function aqm_cf_entries_page() {
 					echo wp_kses_post(
 						paginate_links(
 							array(
-								'base'      => add_query_arg( 'paged', '%#%', remove_query_arg( 'aqm_deleted' ) ),
+								'base'      => add_query_arg( 'paged', '%#%', remove_query_arg( 'aqm_msg' ) ),
 								'format'    => '',
 								'prev_text' => '&laquo;',
 								'next_text' => '&raquo;',
@@ -1312,108 +2206,69 @@ function aqm_cf_entries_page() {
 	<?php
 }
 
-function aqm_cf_entry_detail_page( $id ) {
-	global $wpdb;
-	$table = aqm_cf_entries_table();
-	$entry = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM $table WHERE id = %d", $id ) ); // phpcs:ignore WordPress.DB.PreparedSQL
-
-	echo '<div class="wrap">';
-	echo '<h1>' . esc_html__( 'Contact Entry', 'aqm-contact-form' ) . '</h1>';
-	echo '<p><a href="' . esc_url( admin_url( 'admin.php?page=aqm-contact-entries' ) ) . '">&larr; ' . esc_html__( 'Back to all entries', 'aqm-contact-form' ) . '</a></p>';
-
-	if ( ! $entry ) {
-		echo '<div class="notice notice-error"><p>' . esc_html__( 'That entry no longer exists.', 'aqm-contact-form' ) . '</p></div></div>';
-		return;
-	}
-
-	$rows = array(
-		__( 'Name', 'aqm-contact-form' )       => $entry->name,
-		__( 'Email', 'aqm-contact-form' )      => $entry->email,
-		__( 'Telephone', 'aqm-contact-form' )  => $entry->phone ? $entry->phone : __( 'Not provided', 'aqm-contact-form' ),
-		aqm_cf_field_label()                   => $entry->event_type,
-		__( 'Submitted', 'aqm-contact-form' )  => mysql2date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), $entry->submitted_at ),
-		__( 'Consent given', 'aqm-contact-form' ) => $entry->consent ? __( 'Yes', 'aqm-contact-form' ) : __( 'Not recorded', 'aqm-contact-form' ),
-		__( 'IP address', 'aqm-contact-form' ) => $entry->ip_address ? $entry->ip_address : __( 'Not stored', 'aqm-contact-form' ),
-	);
-
-	echo '<table class="widefat striped" style="max-width:760px">';
-	foreach ( $rows as $label => $value ) {
-		echo '<tr><th style="width:180px">' . esc_html( $label ) . '</th><td>' . esc_html( $value ) . '</td></tr>';
-	}
-	echo '</table>';
-
-	echo '<h2>' . esc_html__( 'Message', 'aqm-contact-form' ) . '</h2>';
-	echo '<div class="postbox" style="max-width:760px;padding:16px 20px;white-space:pre-wrap;">' . esc_html( $entry->message ) . '</div>';
-
-	$subject = rawurlencode( sprintf( /* translators: %s: event type */ __( 'Re: your enquiry about %s', 'aqm-contact-form' ), $entry->event_type ) );
-	echo '<p><a class="button button-primary" href="mailto:' . esc_attr( $entry->email ) . '?subject=' . esc_attr( $subject ) . '">' . esc_html__( 'Reply by email', 'aqm-contact-form' ) . '</a></p>';
-	echo '</div>';
-}
-
 /* ---- CSV export ---- */
-add_action( 'admin_post_aqm_cf_export', 'aqm_cf_export_csv' );
 
-function aqm_cf_export_csv() {
+add_action( 'admin_post_aqm_export_entries', 'aqm_export_entries' );
+
+function aqm_export_entries() {
 	if ( ! current_user_can( 'manage_options' ) ) {
-		wp_die( esc_html__( 'You do not have permission to export entries.', 'aqm-contact-form' ) );
+		wp_die( 'You do not have permission to export submissions.' );
 	}
-	check_admin_referer( 'aqm_cf_export' );
+	check_admin_referer( 'aqm_export_entries' );
 
 	global $wpdb;
-	$table = aqm_cf_entries_table();
 
+	$form_id = (int) ( $_GET['form_id'] ?? 0 );
 	$search  = isset( $_GET['s'] ) ? sanitize_text_field( wp_unslash( $_GET['s'] ) ) : '';
-	$type_id = isset( $_GET['event_type_id'] ) ? (int) $_GET['event_type_id'] : 0;
+	$form    = $form_id ? aqm_get_form( $form_id ) : null;
 
-	$where  = array( '1=1' );
-	$params = array();
+	if ( ! $form ) {
+		wp_die( 'Choose a form before exporting.' );
+	}
+
+	$fields = aqm_get_fields( $form_id );
+	$table  = aqm_table( 'contact_entries' );
+
+	$params = array( $form_id );
+	$sql    = "SELECT * FROM $table WHERE form_id = %d";
 	if ( '' !== $search ) {
-		$like    = '%' . $wpdb->esc_like( $search ) . '%';
-		$where[] = '(name LIKE %s OR email LIKE %s OR phone LIKE %s OR message LIKE %s)';
-		array_push( $params, $like, $like, $like, $like );
+		$sql     .= ' AND form_data LIKE %s';
+		$params[] = '%' . $wpdb->esc_like( $search ) . '%';
 	}
-	if ( $type_id ) {
-		$where[]  = 'event_type_id = %d';
-		$params[] = $type_id;
-	}
-	$sql = "SELECT * FROM $table WHERE " . implode( ' AND ', $where ) . ' ORDER BY submitted_at DESC, id DESC';
+	$sql .= ' ORDER BY submitted_at DESC, id DESC';
 
-	$entries = $params
-		? $wpdb->get_results( $wpdb->prepare( $sql, $params ) ) // phpcs:ignore WordPress.DB.PreparedSQL
-		: $wpdb->get_results( $sql ); // phpcs:ignore WordPress.DB.PreparedSQL
+	$entries = $wpdb->get_results( $wpdb->prepare( $sql, $params ) ); // phpcs:ignore
 
 	nocache_headers();
 	header( 'Content-Type: text/csv; charset=UTF-8' );
-	header( 'Content-Disposition: attachment; filename=aqm-contact-entries-' . gmdate( 'Y-m-d' ) . '.csv' );
+	header( 'Content-Disposition: attachment; filename=aqm-' . sanitize_title( $form->form_name ) . '-' . gmdate( 'Y-m-d' ) . '.csv' );
 
 	$out = fopen( 'php://output', 'w' );
-	fwrite( $out, "\xEF\xBB\xBF" ); // BOM so Excel reads UTF-8 correctly.
+	fwrite( $out, "\xEF\xBB\xBF" ); // BOM, so Excel reads UTF-8 correctly.
 
-	// The explicit empty escape character avoids PHP 8.4's deprecation notice
-	// and stops backslashes being mangled in message text.
-	fputcsv( $out, array( 'ID', 'Name', 'Email', 'Phone', 'Event Type', 'Message', 'Consent', 'IP Address', 'Submitted' ), ',', '"', '' );
+	$header = array( 'ID' );
+	foreach ( $fields as $f ) {
+		$header[] = $f->label;
+	}
+	$header[] = 'Submitted';
+	$header[] = 'IP Address';
 
-	foreach ( $entries as $entry ) {
-		fputcsv(
-			$out,
-			array_map(
-				'aqm_cf_csv_safe',
-				array(
-					$entry->id,
-					$entry->name,
-					$entry->email,
-					$entry->phone,
-					$entry->event_type,
-					$entry->message,
-					$entry->consent ? 'yes' : 'no',
-					$entry->ip_address,
-					$entry->submitted_at,
-				)
-			),
-			',',
-			'"',
-			''
-		);
+	// The empty escape character avoids PHP 8.4's deprecation notice and
+	// stops backslashes being mangled in message text.
+	fputcsv( $out, array_map( 'aqm_csv_safe', $header ), ',', '"', '' );
+
+	foreach ( $entries as $e ) {
+		$data = json_decode( $e->form_data, true );
+		$data = is_array( $data ) ? $data : array();
+
+		$row = array( $e->id );
+		foreach ( $fields as $f ) {
+			$row[] = $data[ $f->field_key ] ?? '';
+		}
+		$row[] = $e->submitted_at;
+		$row[] = $e->ip_address;
+
+		fputcsv( $out, array_map( 'aqm_csv_safe', $row ), ',', '"', '' );
 	}
 
 	fclose( $out );
@@ -1421,9 +2276,10 @@ function aqm_cf_export_csv() {
 }
 
 /**
- * Neutralise spreadsheet formula injection (=, +, -, @, tab, CR).
+ * Neutralise spreadsheet formula injection. Without this, someone can submit
+ * a message beginning "=" and have it execute when you open the export.
  */
-function aqm_cf_csv_safe( $value ) {
+function aqm_csv_safe( $value ) {
 	$value = (string) $value;
 	if ( '' !== $value && preg_match( '/^[=+\-@\t\r]/', $value ) ) {
 		return "'" . $value;
@@ -1431,347 +2287,74 @@ function aqm_cf_csv_safe( $value ) {
 	return $value;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════
-   10. ADMIN — Event Types (add / edit / delete, with PRG)
-   ═══════════════════════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════════════
+   12. ADMIN PAGE - Global settings
+   ══════════════════════════════════════════════════════════════ */
 
-function aqm_cf_event_types_page() {
+function aqm_admin_settings_page() {
 	if ( ! current_user_can( 'manage_options' ) ) {
-		wp_die( esc_html__( 'You do not have permission to view this page.', 'aqm-contact-form' ) );
+		wp_die( 'You do not have permission to view this page.' );
 	}
 
-	global $wpdb;
-	$table    = aqm_cf_event_types_table();
-	$base_url = admin_url( 'admin.php?page=aqm-event-types' );
+	if ( isset( $_POST['aqm_global_nonce'] ) ) {
+		check_admin_referer( 'aqm_save_global', 'aqm_global_nonce' );
 
-	/* ---- Delete ---- */
-	if (
-		isset( $_GET['action'], $_GET['id'], $_GET['_wpnonce'] ) &&
-		'delete' === sanitize_key( wp_unslash( $_GET['action'] ) )
-	) {
-		$id = (int) $_GET['id'];
-		check_admin_referer( 'aqm_delete_event_' . $id );
-		$wpdb->delete( $table, array( 'id' => $id ), array( '%d' ) );
-		aqm_cf_flush_event_type_cache();
-		wp_safe_redirect( add_query_arg( 'aqm_msg', 'deleted', $base_url ) );
+		$proxy = isset( $_POST['proxy_header'] ) ? sanitize_text_field( wp_unslash( $_POST['proxy_header'] ) ) : '';
+		update_option( 'aqm_proxy_header', array_key_exists( $proxy, aqm_proxy_headers() ) ? $proxy : '' );
+		update_option( 'aqm_rate_limit', max( 0, min( 100, (int) ( $_POST['rate_limit'] ?? 5 ) ) ) );
+		update_option( 'aqm_delete_on_uninstall', empty( $_POST['delete_on_uninstall'] ) ? 0 : 1 );
+
+		wp_safe_redirect( add_query_arg( 'aqm_msg', 'settings_saved', admin_url( 'admin.php?page=aqm-settings' ) ) );
 		exit;
 	}
 
-	/* ---- Add / edit ---- */
-	if ( isset( $_POST['aqm_event_nonce'] ) ) {
-		check_admin_referer( 'aqm_save_event_type', 'aqm_event_nonce' );
-
-		$label   = isset( $_POST['aqm_event_label'] ) ? sanitize_text_field( wp_unslash( $_POST['aqm_event_label'] ) ) : '';
-		$edit_id = isset( $_POST['aqm_edit_id'] ) ? (int) $_POST['aqm_edit_id'] : 0;
-		$has_ord = isset( $_POST['aqm_event_order'] ) && '' !== trim( (string) wp_unslash( $_POST['aqm_event_order'] ) );
-		$order   = $has_ord ? max( 0, (int) $_POST['aqm_event_order'] ) : null;
-
-		if ( '' === $label ) {
-			wp_safe_redirect( add_query_arg( 'aqm_msg', 'empty', $base_url ) );
-			exit;
-		}
-
-		// Reject duplicates — two identically named types are confusing in reports.
-		$duplicate = (int) $wpdb->get_var( // phpcs:ignore WordPress.DB.PreparedSQL
-			$wpdb->prepare( "SELECT COUNT(*) FROM $table WHERE label = %s AND id <> %d", $label, $edit_id )
-		);
-		if ( $duplicate ) {
-			wp_safe_redirect( add_query_arg( 'aqm_msg', 'duplicate', $base_url ) );
-			exit;
-		}
-
-		if ( $edit_id ) {
-			$current = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM $table WHERE id = %d", $edit_id ) ); // phpcs:ignore WordPress.DB.PreparedSQL
-			$wpdb->update(
-				$table,
-				array(
-					'label'      => $label,
-					'sort_order' => null === $order ? (int) ( $current->sort_order ?? 0 ) : $order,
-				),
-				array( 'id' => $edit_id ),
-				array( '%s', '%d' ),
-				array( '%d' )
-			);
-			$msg = 'updated';
-		} else {
-			$max = (int) $wpdb->get_var( "SELECT MAX(sort_order) FROM $table" ); // phpcs:ignore WordPress.DB.PreparedSQL
-			$wpdb->insert(
-				$table,
-				array(
-					'label'      => $label,
-					'sort_order' => null === $order ? $max + 1 : $order,
-				),
-				array( '%s', '%d' )
-			);
-			$msg = 'added';
-		}
-
-		aqm_cf_flush_event_type_cache();
-		wp_safe_redirect( add_query_arg( 'aqm_msg', $msg, $base_url ) );
-		exit;
-	}
-
-	/* ---- Notices ---- */
-	$notices = array(
-		'added'     => array( 'success', __( 'Event type added.', 'aqm-contact-form' ) ),
-		'updated'   => array( 'success', __( 'Event type updated.', 'aqm-contact-form' ) ),
-		'deleted'   => array( 'success', __( 'Event type deleted.', 'aqm-contact-form' ) ),
-		'empty'     => array( 'error', __( 'Event type name cannot be empty.', 'aqm-contact-form' ) ),
-		'duplicate' => array( 'error', __( 'An event type with that name already exists.', 'aqm-contact-form' ) ),
-	);
-	$msg_key = isset( $_GET['aqm_msg'] ) ? sanitize_key( wp_unslash( $_GET['aqm_msg'] ) ) : '';
-
-	/* ---- Record being edited ---- */
-	$editing = null;
-	if ( isset( $_GET['action'], $_GET['id'] ) && 'edit' === sanitize_key( wp_unslash( $_GET['action'] ) ) ) {
-		$editing = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM $table WHERE id = %d", (int) $_GET['id'] ) ); // phpcs:ignore WordPress.DB.PreparedSQL
-	}
-
-	$event_types = aqm_cf_get_event_types();
+	$proxy_header = (string) get_option( 'aqm_proxy_header', '' );
+	$rate_limit   = (int) get_option( 'aqm_rate_limit', 5 );
+	$delete_all   = (int) get_option( 'aqm_delete_on_uninstall', 0 );
+	$detected_ip  = aqm_get_client_ip();
 	?>
 	<div class="wrap">
-		<h1><?php esc_html_e( 'Manage Event Types', 'aqm-contact-form' ); ?></h1>
+		<h1>Global Settings</h1>
+		<p class="description">These apply to every form. Per-form options live in the Form Builder.</p>
 
-		<?php if ( isset( $notices[ $msg_key ] ) ) : ?>
-			<div class="notice notice-<?php echo esc_attr( $notices[ $msg_key ][0] ); ?> is-dismissible">
-				<p><?php echo esc_html( $notices[ $msg_key ][1] ); ?></p>
-			</div>
-		<?php endif; ?>
+		<?php aqm_render_notice(); ?>
 
-		<div style="display:flex;gap:40px;align-items:flex-start;margin-top:20px;flex-wrap:wrap;">
+		<form method="post">
+			<?php wp_nonce_field( 'aqm_save_global', 'aqm_global_nonce' ); ?>
 
-			<div style="flex:1;min-width:320px;">
-				<h2 style="margin-top:0"><?php esc_html_e( 'Current Event Types', 'aqm-contact-form' ); ?></h2>
-				<?php if ( $event_types ) : ?>
-					<table class="widefat fixed striped">
-						<thead>
-							<tr>
-								<th style="width:70px"><?php esc_html_e( 'Order', 'aqm-contact-form' ); ?></th>
-								<th><?php esc_html_e( 'Event Type Name', 'aqm-contact-form' ); ?></th>
-								<th style="width:90px"><?php esc_html_e( 'Entries', 'aqm-contact-form' ); ?></th>
-								<th style="width:150px"><?php esc_html_e( 'Actions', 'aqm-contact-form' ); ?></th>
-							</tr>
-						</thead>
-						<tbody>
-						<?php
-						// One grouped query rather than one per row.
-						$entries_table = aqm_cf_entries_table();
-						$counts        = array();
-						foreach ( (array) $wpdb->get_results( "SELECT event_type_id, COUNT(*) AS total FROM $entries_table GROUP BY event_type_id" ) as $row ) { // phpcs:ignore WordPress.DB.PreparedSQL
-							$counts[ (int) $row->event_type_id ] = (int) $row->total;
-						}
-						foreach ( $event_types as $type ) :
-							$used       = $counts[ (int) $type->id ] ?? 0;
-							$edit_url   = add_query_arg(
-								array(
-									'action' => 'edit',
-									'id'     => $type->id,
-								),
-								$base_url
-							);
-							$delete_url = wp_nonce_url(
-								add_query_arg(
-									array(
-										'action' => 'delete',
-										'id'     => $type->id,
-									),
-									$base_url
-								),
-								'aqm_delete_event_' . $type->id
-							);
-							?>
-							<tr>
-								<td><?php echo esc_html( $type->sort_order ); ?></td>
-								<td><?php echo esc_html( $type->label ); ?></td>
-								<td><?php echo esc_html( number_format_i18n( $used ) ); ?></td>
-								<td>
-									<a href="<?php echo esc_url( $edit_url ); ?>" class="button button-small"><?php esc_html_e( 'Edit', 'aqm-contact-form' ); ?></a>
-									&nbsp;
-									<a href="<?php echo esc_url( $delete_url ); ?>"
-										class="button button-small"
-										style="color:#b32d2e;border-color:#b32d2e;"
-										onclick="return confirm('<?php echo esc_js( __( 'Delete this event type? Existing entries keep their saved label. This cannot be undone.', 'aqm-contact-form' ) ); ?>')"><?php esc_html_e( 'Delete', 'aqm-contact-form' ); ?></a>
-								</td>
-							</tr>
-						<?php endforeach; ?>
-						</tbody>
-					</table>
-					<p class="description"><?php esc_html_e( 'Deleting a type removes it from the form only — past entries keep the label they were submitted with.', 'aqm-contact-form' ); ?></p>
-				<?php else : ?>
-					<p><?php esc_html_e( 'No event types yet. Add one using the form.', 'aqm-contact-form' ); ?></p>
-				<?php endif; ?>
-			</div>
-
-			<div style="flex:0 0 300px;">
-				<h2 style="margin-top:0"><?php echo $editing ? esc_html__( 'Edit Event Type', 'aqm-contact-form' ) : esc_html__( 'Add New Event Type', 'aqm-contact-form' ); ?></h2>
-				<div class="postbox" style="padding:16px 20px;">
-					<form method="post" action="<?php echo esc_url( $base_url ); ?>">
-						<?php wp_nonce_field( 'aqm_save_event_type', 'aqm_event_nonce' ); ?>
-						<?php if ( $editing ) : ?>
-							<input type="hidden" name="aqm_edit_id" value="<?php echo esc_attr( $editing->id ); ?>">
-						<?php endif; ?>
-
-						<p>
-							<label for="aqm_event_label"><strong><?php esc_html_e( 'Name', 'aqm-contact-form' ); ?> <span style="color:#9a6c1f">*</span></strong></label><br>
-							<input type="text" id="aqm_event_label" name="aqm_event_label"
-								class="regular-text" maxlength="120"
-								value="<?php echo esc_attr( $editing ? $editing->label : '' ); ?>"
-								placeholder="<?php esc_attr_e( 'e.g. Prayer Gathering', 'aqm-contact-form' ); ?>"
-								style="width:100%;margin-top:4px" required>
-						</p>
-						<p>
-							<label for="aqm_event_order"><strong><?php esc_html_e( 'Sort Order', 'aqm-contact-form' ); ?></strong></label><br>
-							<input type="number" id="aqm_event_order" name="aqm_event_order"
-								value="<?php echo esc_attr( $editing ? $editing->sort_order : '' ); ?>"
-								placeholder="<?php esc_attr_e( 'Auto', 'aqm-contact-form' ); ?>" min="1" style="width:80px;margin-top:4px">
-							<br><span class="description"><?php esc_html_e( 'Lower numbers appear first. Leave blank to keep the current position.', 'aqm-contact-form' ); ?></span>
-						</p>
-						<p style="display:flex;gap:10px;align-items:center;margin-top:16px;">
-							<?php submit_button( $editing ? __( 'Update', 'aqm-contact-form' ) : __( 'Add Event Type', 'aqm-contact-form' ), 'primary', 'submit', false ); ?>
-							<?php if ( $editing ) : ?>
-								<a href="<?php echo esc_url( $base_url ); ?>" class="button"><?php esc_html_e( 'Cancel', 'aqm-contact-form' ); ?></a>
-							<?php endif; ?>
-						</p>
-					</form>
-				</div>
-			</div>
-
-		</div>
-	</div>
-	<?php
-}
-
-/* ═══════════════════════════════════════════════════════════════════════
-   11. ADMIN — Settings
-   ═══════════════════════════════════════════════════════════════════════ */
-
-function aqm_cf_settings_page() {
-	if ( ! current_user_can( 'manage_options' ) ) {
-		wp_die( esc_html__( 'You do not have permission to view this page.', 'aqm-contact-form' ) );
-	}
-	$s = aqm_cf_get_settings();
-	?>
-	<div class="wrap">
-		<h1><?php esc_html_e( 'Contact Form Settings', 'aqm-contact-form' ); ?></h1>
-		<p class="description"><?php esc_html_e( 'Place the form on any page with the shortcode [aqm_contact_form].', 'aqm-contact-form' ); ?></p>
-
-		<?php settings_errors( 'aqm_cf_settings' ); ?>
-
-		<form method="post" action="options.php">
-			<?php settings_fields( 'aqm_cf_settings_group' ); ?>
-
-			<h2><?php esc_html_e( 'The Form', 'aqm-contact-form' ); ?></h2>
+			<h2>Spam Protection</h2>
 			<table class="form-table" role="presentation">
 				<tr>
-					<th scope="row"><label for="aqm_field_label"><?php esc_html_e( 'Name of the dropdown', 'aqm-contact-form' ); ?></label></th>
+					<th scope="row"><label for="rate_limit">Submissions per hour</label></th>
 					<td>
-						<input type="text" id="aqm_field_label" class="regular-text" name="aqm_cf_settings[field_label]" value="<?php echo esc_attr( $s['field_label'] ); ?>">
-						<p class="description"><?php esc_html_e( 'What the list of options is called on the form — “Type of Event”, “Session Type”, “Reason for Contact”, and so on. The options themselves are managed under Event Types.', 'aqm-contact-form' ); ?></p>
+						<input type="number" id="rate_limit" name="rate_limit" min="0" max="100" value="<?php echo esc_attr( $rate_limit ); ?>" class="small-text">
+						<p class="description">Per IP address, across all forms. Set to 0 to disable rate limiting.</p>
 					</td>
 				</tr>
 				<tr>
-					<th scope="row"><label for="aqm_success"><?php esc_html_e( 'Thank-you message', 'aqm-contact-form' ); ?></label></th>
+					<th scope="row"><label for="proxy_header">Is this site behind a proxy?</label></th>
 					<td>
-						<input type="text" id="aqm_success" class="large-text" name="aqm_cf_settings[success_message]" value="<?php echo esc_attr( $s['success_message'] ); ?>">
-						<p class="description"><?php esc_html_e( 'Shown on the page after a successful submission. {name} is available.', 'aqm-contact-form' ); ?></p>
-					</td>
-				</tr>
-			</table>
-
-			<h2><?php esc_html_e( 'Notifications', 'aqm-contact-form' ); ?></h2>
-			<table class="form-table" role="presentation">
-				<tr>
-					<th scope="row"><label for="aqm_notify_email"><?php esc_html_e( 'Send enquiries to', 'aqm-contact-form' ); ?></label></th>
-					<td><input type="email" id="aqm_notify_email" class="regular-text" name="aqm_cf_settings[notify_email]" value="<?php echo esc_attr( $s['notify_email'] ); ?>" required></td>
-				</tr>
-				<tr>
-					<th scope="row"><label for="aqm_notify_cc"><?php esc_html_e( 'Cc (optional)', 'aqm-contact-form' ); ?></label></th>
-					<td>
-						<input type="text" id="aqm_notify_cc" class="regular-text" name="aqm_cf_settings[notify_cc]" value="<?php echo esc_attr( $s['notify_cc'] ); ?>">
-						<p class="description"><?php esc_html_e( 'Comma-separated. Invalid addresses are dropped when you save.', 'aqm-contact-form' ); ?></p>
-					</td>
-				</tr>
-				<tr>
-					<th scope="row"><?php esc_html_e( 'Auto-reply', 'aqm-contact-form' ); ?></th>
-					<td>
-						<label><input type="checkbox" name="aqm_cf_settings[autoreply]" value="1" <?php checked( 1, (int) $s['autoreply'] ); ?>> <?php esc_html_e( 'Send a confirmation email to the person who wrote in', 'aqm-contact-form' ); ?></label>
-						<p style="margin-top:10px">
-							<label for="aqm_ar_subject"><?php esc_html_e( 'Subject', 'aqm-contact-form' ); ?></label><br>
-							<input type="text" id="aqm_ar_subject" class="large-text" name="aqm_cf_settings[autoreply_subject]" value="<?php echo esc_attr( $s['autoreply_subject'] ); ?>">
-						</p>
-						<p>
-							<label for="aqm_ar_body"><?php esc_html_e( 'Message', 'aqm-contact-form' ); ?></label><br>
-							<textarea id="aqm_ar_body" class="large-text" rows="8" name="aqm_cf_settings[autoreply_body]"><?php echo esc_textarea( $s['autoreply_body'] ); ?></textarea>
-						</p>
-						<p class="description"><?php esc_html_e( 'Placeholders: {name} {email} {event_type} {message} {site_name}', 'aqm-contact-form' ); ?></p>
-					</td>
-				</tr>
-			</table>
-
-			<h2><?php esc_html_e( 'Spam Protection', 'aqm-contact-form' ); ?></h2>
-			<table class="form-table" role="presentation">
-				<tr>
-					<th scope="row"><?php esc_html_e( 'Silent traps', 'aqm-contact-form' ); ?></th>
-					<td>
-						<label><input type="checkbox" name="aqm_cf_settings[spam_protection]" value="1" <?php checked( 1, (int) $s['spam_protection'] ); ?>> <?php esc_html_e( 'Enable honeypot and timing checks (no CAPTCHA, invisible to visitors)', 'aqm-contact-form' ); ?></label>
-					</td>
-				</tr>
-				<tr>
-					<th scope="row"><label for="aqm_rate"><?php esc_html_e( 'Submissions per hour', 'aqm-contact-form' ); ?></label></th>
-					<td>
-						<input type="number" id="aqm_rate" min="0" max="100" name="aqm_cf_settings[rate_limit]" value="<?php echo esc_attr( $s['rate_limit'] ); ?>" class="small-text">
-						<p class="description"><?php esc_html_e( 'Per IP address. Set to 0 to disable rate limiting.', 'aqm-contact-form' ); ?></p>
-					</td>
-				</tr>
-				<tr>
-					<th scope="row"><label for="aqm_links"><?php esc_html_e( 'Maximum links in a message', 'aqm-contact-form' ); ?></label></th>
-					<td>
-						<input type="number" id="aqm_links" min="0" max="50" name="aqm_cf_settings[max_links]" value="<?php echo esc_attr( $s['max_links'] ); ?>" class="small-text">
-						<p class="description"><?php esc_html_e( 'Set to 0 to allow any number of links.', 'aqm-contact-form' ); ?></p>
-					</td>
-				</tr>
-				<tr>
-					<th scope="row"><label for="aqm_proxy"><?php esc_html_e( 'Is this site behind a proxy?', 'aqm-contact-form' ); ?></label></th>
-					<td>
-						<select id="aqm_proxy" name="aqm_cf_settings[proxy_header]">
-							<?php foreach ( aqm_cf_proxy_headers() as $key => $label ) : ?>
-								<option value="<?php echo esc_attr( $key ); ?>" <?php selected( $s['proxy_header'], $key ); ?>><?php echo esc_html( $label ); ?></option>
+						<select id="proxy_header" name="proxy_header">
+							<?php foreach ( aqm_proxy_headers() as $key => $label ) : ?>
+								<option value="<?php echo esc_attr( $key ); ?>" <?php selected( $proxy_header, $key ); ?>><?php echo esc_html( $label ); ?></option>
 							<?php endforeach; ?>
 						</select>
 						<p class="description">
-							<?php esc_html_e( 'Rate limiting counts submissions per visitor IP. Behind Cloudflare or a load balancer the server sees the proxy’s address instead, so every visitor shares one allowance and genuine enquiries get blocked. Pick your proxy here to fix that.', 'aqm-contact-form' ); ?>
-							<br>
-							<strong><?php esc_html_e( 'Detected right now:', 'aqm-contact-form' ); ?></strong>
-							<code><?php echo esc_html( aqm_cf_get_client_ip() ? aqm_cf_get_client_ip() : __( 'unknown', 'aqm-contact-form' ) ); ?></code>
-							<?php esc_html_e( '— if that is not your own IP address, choose a different option above.', 'aqm-contact-form' ); ?>
+							Behind Cloudflare or a load balancer the server sees the proxy's address, so every visitor shares one allowance and genuine enquiries get blocked.
+							<br><strong>Detected right now:</strong> <code><?php echo esc_html( $detected_ip ? $detected_ip : 'unknown' ); ?></code>
+							&mdash; if that is not your own IP address, choose a different option above.
 						</p>
 					</td>
 				</tr>
 			</table>
 
-			<h2><?php esc_html_e( 'Privacy', 'aqm-contact-form' ); ?></h2>
+			<h2>Uninstall</h2>
 			<table class="form-table" role="presentation">
 				<tr>
-					<th scope="row"><?php esc_html_e( 'Consent checkbox', 'aqm-contact-form' ); ?></th>
+					<th scope="row">Data</th>
 					<td>
-						<label><input type="checkbox" name="aqm_cf_settings[consent_enabled]" value="1" <?php checked( 1, (int) $s['consent_enabled'] ); ?>> <?php esc_html_e( 'Require visitors to agree before submitting', 'aqm-contact-form' ); ?></label>
-						<p style="margin-top:10px">
-							<input type="text" class="large-text" name="aqm_cf_settings[consent_text]" value="<?php echo esc_attr( $s['consent_text'] ); ?>">
-						</p>
-					</td>
-				</tr>
-				<tr>
-					<th scope="row"><?php esc_html_e( 'IP addresses', 'aqm-contact-form' ); ?></th>
-					<td>
-						<label><input type="checkbox" name="aqm_cf_settings[store_ip]" value="1" <?php checked( 1, (int) $s['store_ip'] ); ?>> <?php esc_html_e( 'Store the sender’s IP address with each entry', 'aqm-contact-form' ); ?></label><br>
-						<label><input type="checkbox" name="aqm_cf_settings[anonymise_ip]" value="1" <?php checked( 1, (int) $s['anonymise_ip'] ); ?>> <?php esc_html_e( 'Anonymise it (mask the last portion)', 'aqm-contact-form' ); ?></label>
-					</td>
-				</tr>
-				<tr>
-					<th scope="row"><?php esc_html_e( 'Uninstall', 'aqm-contact-form' ); ?></th>
-					<td>
-						<label><input type="checkbox" name="aqm_cf_settings[delete_on_uninstall]" value="1" <?php checked( 1, (int) $s['delete_on_uninstall'] ); ?>> <?php esc_html_e( 'Delete all entries and settings if this plugin is deleted', 'aqm-contact-form' ); ?></label>
-						<p class="description"><?php esc_html_e( 'Leave unticked to keep your enquiry history safe.', 'aqm-contact-form' ); ?></p>
+						<label><input type="checkbox" name="delete_on_uninstall" value="1" <?php checked( 1, $delete_all ); ?>> Delete all forms and submissions if this plugin is deleted</label>
+						<p class="description">Leave unticked to keep your history safe.</p>
 					</td>
 				</tr>
 			</table>
@@ -1782,142 +2365,47 @@ function aqm_cf_settings_page() {
 	<?php
 }
 
-/* ═══════════════════════════════════════════════════════════════════════
-   12. PRIVACY TOOLS — export & erase personal data
-   ═══════════════════════════════════════════════════════════════════════ */
-
-add_filter( 'wp_privacy_personal_data_exporters', 'aqm_cf_register_exporter' );
-add_filter( 'wp_privacy_personal_data_erasers', 'aqm_cf_register_eraser' );
-
-function aqm_cf_register_exporter( $exporters ) {
-	$exporters['aqm-contact-form'] = array(
-		'exporter_friendly_name' => __( 'A. Q. Mufti Contact Form', 'aqm-contact-form' ),
-		'callback'               => 'aqm_cf_export_personal_data',
-	);
-	return $exporters;
-}
-
-function aqm_cf_export_personal_data( $email, $page = 1 ) {
-	global $wpdb;
-	$table   = aqm_cf_entries_table();
-	$entries = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM $table WHERE email = %s", $email ) ); // phpcs:ignore WordPress.DB.PreparedSQL
-
-	$export = array();
-	foreach ( (array) $entries as $entry ) {
-		$export[] = array(
-			'group_id'    => 'aqm-contact-form',
-			'group_label' => __( 'Contact form submissions', 'aqm-contact-form' ),
-			'item_id'     => 'aqm-entry-' . $entry->id,
-			'data'        => array(
-				array(
-					'name'  => __( 'Name', 'aqm-contact-form' ),
-					'value' => $entry->name,
-				),
-				array(
-					'name'  => __( 'Email', 'aqm-contact-form' ),
-					'value' => $entry->email,
-				),
-				array(
-					'name'  => __( 'Telephone', 'aqm-contact-form' ),
-					'value' => $entry->phone,
-				),
-				array(
-					'name'  => __( 'Event type', 'aqm-contact-form' ),
-					'value' => $entry->event_type,
-				),
-				array(
-					'name'  => __( 'Message', 'aqm-contact-form' ),
-					'value' => $entry->message,
-				),
-				array(
-					'name'  => __( 'Submitted', 'aqm-contact-form' ),
-					'value' => $entry->submitted_at,
-				),
-			),
-		);
-	}
-
-	return array(
-		'data' => $export,
-		'done' => true,
-	);
-}
-
-function aqm_cf_register_eraser( $erasers ) {
-	$erasers['aqm-contact-form'] = array(
-		'eraser_friendly_name' => __( 'A. Q. Mufti Contact Form', 'aqm-contact-form' ),
-		'callback'             => 'aqm_cf_erase_personal_data',
-	);
-	return $erasers;
-}
-
-function aqm_cf_erase_personal_data( $email, $page = 1 ) {
-	global $wpdb;
-	$removed = (int) $wpdb->delete( aqm_cf_entries_table(), array( 'email' => $email ), array( '%s' ) );
-
-	return array(
-		'items_removed'  => $removed > 0,
-		'items_retained' => false,
-		'messages'       => array(),
-		'done'           => true,
-	);
-}
-
-/* ═══════════════════════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════════════════
    13. SELF-UPDATE FROM GITHUB RELEASES
 
-   WordPress only knows how to update plugins it can look up somewhere. These
-   filters point it at this plugin's GitHub releases instead of wordpress.org,
-   so updates appear in Dashboard → Updates like any other plugin.
+   To release: bump the Version header AND AQM_VERSION to match,
+   tag the release v<version> on GitHub, and attach the built .zip.
+   ══════════════════════════════════════════════════════════════ */
 
-   To release: tag a new version on GitHub, attach the built .zip to the
-   release, and make sure the "Version:" header above matches the tag.
-   ═══════════════════════════════════════════════════════════════════════ */
-
-/**
- * The latest published release, or null if GitHub could not be reached.
- *
- * Cached for 12 hours so we are not hitting the API on every admin page load;
- * failures are cached for 1 hour so an outage does not slow the dashboard.
- *
- * @param bool $force Ignore the cache and ask GitHub now.
- * @return array|null version, package, url, changelog, published
- */
-function aqm_cf_github_release( $force = false ) {
-	$cache_key = 'aqm_cf_gh_release';
+function aqm_github_release( $force = false ) {
+	$key = 'aqm_gh_release';
 
 	if ( ! $force ) {
-		$cached = get_transient( $cache_key );
+		$cached = get_transient( $key );
 		if ( is_array( $cached ) ) {
 			return empty( $cached['version'] ) ? null : $cached;
 		}
 	}
 
 	$response = wp_remote_get(
-		'https://api.github.com/repos/' . AQM_CF_GITHUB_REPO . '/releases/latest',
+		'https://api.github.com/repos/' . AQM_GITHUB_REPO . '/releases/latest',
 		array(
 			'timeout' => 10,
 			'headers' => array(
 				'Accept'     => 'application/vnd.github+json',
-				'User-Agent' => 'aqm-contact-form/' . AQM_CF_VERSION,
+				'User-Agent' => 'aqm-contact-form/' . AQM_VERSION,
 			),
 		)
 	);
 
 	if ( is_wp_error( $response ) || 200 !== (int) wp_remote_retrieve_response_code( $response ) ) {
-		set_transient( $cache_key, array(), HOUR_IN_SECONDS );
+		set_transient( $key, array(), HOUR_IN_SECONDS );
 		return null;
 	}
 
 	$body = json_decode( wp_remote_retrieve_body( $response ), true );
 	if ( ! is_array( $body ) || empty( $body['tag_name'] ) ) {
-		set_transient( $cache_key, array(), HOUR_IN_SECONDS );
+		set_transient( $key, array(), HOUR_IN_SECONDS );
 		return null;
 	}
 
-	// Prefer a .zip attached to the release. GitHub's automatic "zipball"
-	// names its top-level folder after the commit, which would install the
-	// plugin as a duplicate rather than updating it in place.
+	// Prefer an attached .zip. GitHub's automatic zipball names its folder
+	// after the commit, which would install a duplicate rather than update.
 	$package = '';
 	foreach ( (array) ( $body['assets'] ?? array() ) as $asset ) {
 		if ( ! empty( $asset['browser_download_url'] ) && '.zip' === substr( $asset['name'] ?? '', -4 ) ) {
@@ -1932,36 +2420,32 @@ function aqm_cf_github_release( $force = false ) {
 	$release = array(
 		'version'   => ltrim( (string) $body['tag_name'], 'vV' ),
 		'package'   => $package,
-		'url'       => $body['html_url'] ?? 'https://github.com/' . AQM_CF_GITHUB_REPO,
+		'url'       => $body['html_url'] ?? 'https://github.com/' . AQM_GITHUB_REPO,
 		'changelog' => (string) ( $body['body'] ?? '' ),
 		'published' => (string) ( $body['published_at'] ?? '' ),
 	);
 
-	set_transient( $cache_key, $release, 12 * HOUR_IN_SECONDS );
+	set_transient( $key, $release, 12 * HOUR_IN_SECONDS );
 	return $release;
 }
 
-/**
- * Tell WordPress an update is available.
- */
-add_filter( 'site_transient_update_plugins', 'aqm_cf_inject_update' );
+add_filter( 'site_transient_update_plugins', 'aqm_inject_update' );
 
-function aqm_cf_inject_update( $transient ) {
+function aqm_inject_update( $transient ) {
 	if ( ! is_object( $transient ) ) {
 		return $transient;
 	}
 
-	$plugin  = plugin_basename( AQM_CF_FILE );
-	$slug    = dirname( $plugin );
-	$release = aqm_cf_github_release();
+	$plugin  = plugin_basename( AQM_FILE );
+	$release = aqm_github_release();
 
 	if ( ! $release || ! $release['package'] ) {
 		return $transient;
 	}
 
 	$item = (object) array(
-		'id'           => 'github.com/' . AQM_CF_GITHUB_REPO,
-		'slug'         => $slug,
+		'id'           => 'github.com/' . AQM_GITHUB_REPO,
+		'slug'         => dirname( $plugin ),
 		'plugin'       => $plugin,
 		'new_version'  => $release['version'],
 		'url'          => $release['url'],
@@ -1973,41 +2457,33 @@ function aqm_cf_inject_update( $transient ) {
 		'tested'       => get_bloginfo( 'version' ),
 	);
 
-	if ( version_compare( $release['version'], AQM_CF_VERSION, '>' ) ) {
+	if ( version_compare( $release['version'], AQM_VERSION, '>' ) ) {
 		$transient->response[ $plugin ] = $item;
 	} else {
-		// Listing it here (rather than omitting it) is what makes the
-		// "Enable auto-updates" link appear on the Plugins screen.
+		// Listing it here is what makes "Enable auto-updates" appear.
 		$transient->no_update[ $plugin ] = $item;
 	}
 
 	return $transient;
 }
 
-/**
- * Fill in the "View details" popup.
- */
-add_filter( 'plugins_api', 'aqm_cf_plugin_details', 20, 3 );
+add_filter( 'plugins_api', 'aqm_plugin_details', 20, 3 );
 
-function aqm_cf_plugin_details( $result, $action, $args ) {
+function aqm_plugin_details( $result, $action, $args ) {
 	if ( 'plugin_information' !== $action ) {
 		return $result;
 	}
-	if ( empty( $args->slug ) || dirname( plugin_basename( AQM_CF_FILE ) ) !== $args->slug ) {
+	if ( empty( $args->slug ) || dirname( plugin_basename( AQM_FILE ) ) !== $args->slug ) {
 		return $result;
 	}
 
-	$release = aqm_cf_github_release();
+	$release = aqm_github_release();
 	if ( ! $release ) {
 		return $result;
 	}
 
-	$changelog = $release['changelog']
-		? wpautop( wp_kses_post( $release['changelog'] ) )
-		: '<p>' . esc_html__( 'No release notes were provided.', 'aqm-contact-form' ) . '</p>';
-
 	return (object) array(
-		'name'          => 'A. Q. Mufti – Contact Form',
+		'name'          => 'A. Q. Mufti - Contact Form',
 		'slug'          => $args->slug,
 		'version'       => $release['version'],
 		'author'        => '<a href="https://github.com/AQMufti">A. Q. Mufti</a>',
@@ -2017,31 +2493,25 @@ function aqm_cf_plugin_details( $result, $action, $args ) {
 		'requires_php'  => '7.4',
 		'last_updated'  => $release['published'],
 		'sections'      => array(
-			'description' => '<p>' . esc_html__( 'Contact form with email notification, database storage, admin-managed event types, spam protection and CSV export.', 'aqm-contact-form' ) . '</p>',
-			'changelog'   => $changelog,
+			'description' => '<p>Multi-form builder with combobox fields, CAPTCHA, spam protection and CSV export.</p>',
+			'changelog'   => $release['changelog'] ? wpautop( wp_kses_post( $release['changelog'] ) ) : '<p>No release notes were provided.</p>',
 		),
 	);
 }
 
-/**
- * Make sure the unpacked folder keeps the plugin's own name.
- *
- * Without this, a download whose folder is named after the release tag would
- * be installed alongside the existing copy instead of replacing it.
- */
-add_filter( 'upgrader_source_selection', 'aqm_cf_correct_source_dir', 10, 4 );
+add_filter( 'upgrader_source_selection', 'aqm_correct_source_dir', 10, 4 );
 
-function aqm_cf_correct_source_dir( $source, $remote_source, $upgrader, $hook_extra = null ) {
+function aqm_correct_source_dir( $source, $remote_source, $upgrader, $hook_extra = null ) {
 	global $wp_filesystem;
 
-	if ( empty( $hook_extra['plugin'] ) || plugin_basename( AQM_CF_FILE ) !== $hook_extra['plugin'] ) {
+	if ( empty( $hook_extra['plugin'] ) || plugin_basename( AQM_FILE ) !== $hook_extra['plugin'] ) {
 		return $source;
 	}
 	if ( ! $wp_filesystem ) {
 		return $source;
 	}
 
-	$desired = trailingslashit( $remote_source ) . dirname( plugin_basename( AQM_CF_FILE ) );
+	$desired = trailingslashit( $remote_source ) . dirname( plugin_basename( AQM_FILE ) );
 
 	if ( trailingslashit( $source ) === trailingslashit( $desired ) ) {
 		return $source;
@@ -2050,106 +2520,90 @@ function aqm_cf_correct_source_dir( $source, $remote_source, $upgrader, $hook_ex
 		return trailingslashit( $desired );
 	}
 
-	return new WP_Error(
-		'aqm_cf_rename_failed',
-		__( 'The update was downloaded but its folder could not be renamed. Please install it manually.', 'aqm-contact-form' )
-	);
+	return new WP_Error( 'aqm_rename_failed', 'The update was downloaded but its folder could not be renamed. Please install it manually.' );
 }
 
-/** Drop the cached release info once an update has been installed. */
-add_action( 'upgrader_process_complete', 'aqm_cf_clear_release_cache', 10, 0 );
+add_action( 'upgrader_process_complete', 'aqm_clear_release_cache', 10, 0 );
 
-function aqm_cf_clear_release_cache() {
-	delete_transient( 'aqm_cf_gh_release' );
+function aqm_clear_release_cache() {
+	delete_transient( 'aqm_gh_release' );
 }
 
-/** A "Check for updates" link on the Plugins screen. */
-add_filter( 'plugin_row_meta', 'aqm_cf_plugin_row_meta', 10, 2 );
+add_filter( 'plugin_row_meta', 'aqm_plugin_row_meta', 10, 2 );
 
-function aqm_cf_plugin_row_meta( $links, $file ) {
-	if ( plugin_basename( AQM_CF_FILE ) !== $file || ! current_user_can( 'update_plugins' ) ) {
+function aqm_plugin_row_meta( $links, $file ) {
+	if ( plugin_basename( AQM_FILE ) !== $file || ! current_user_can( 'update_plugins' ) ) {
 		return $links;
 	}
-
-	$links[] = '<a href="' . esc_url(
-		wp_nonce_url( admin_url( 'admin-post.php?action=aqm_cf_check_update' ), 'aqm_cf_check_update' )
-	) . '">' . esc_html__( 'Check for updates', 'aqm-contact-form' ) . '</a>';
-
+	$links[] = '<a href="' . esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=aqm_check_update' ), 'aqm_check_update' ) ) . '">Check for updates</a>';
 	return $links;
 }
 
-add_action( 'admin_post_aqm_cf_check_update', 'aqm_cf_force_update_check' );
+add_action( 'admin_post_aqm_check_update', 'aqm_force_update_check' );
 
-function aqm_cf_force_update_check() {
+function aqm_force_update_check() {
 	if ( ! current_user_can( 'update_plugins' ) ) {
-		wp_die( esc_html__( 'You do not have permission to check for updates.', 'aqm-contact-form' ) );
+		wp_die( 'You do not have permission to check for updates.' );
 	}
-	check_admin_referer( 'aqm_cf_check_update' );
+	check_admin_referer( 'aqm_check_update' );
 
-	$release = aqm_cf_github_release( true );
+	$release = aqm_github_release( true );
 	delete_site_transient( 'update_plugins' );
 
 	$status = 'unreachable';
 	if ( $release ) {
-		$status = version_compare( $release['version'], AQM_CF_VERSION, '>' ) ? 'available' : 'current';
+		$status = version_compare( $release['version'], AQM_VERSION, '>' ) ? 'available' : 'current';
 	}
 
-	wp_safe_redirect( add_query_arg( 'aqm_cf_update', $status, admin_url( 'plugins.php' ) ) );
+	wp_safe_redirect( add_query_arg( 'aqm_update', $status, admin_url( 'plugins.php' ) ) );
 	exit;
 }
 
-add_action( 'admin_notices', 'aqm_cf_update_check_notice' );
+add_action( 'admin_notices', 'aqm_update_check_notice' );
 
-function aqm_cf_update_check_notice() {
-	if ( empty( $_GET['aqm_cf_update'] ) || ! current_user_can( 'update_plugins' ) ) {
+function aqm_update_check_notice() {
+	if ( empty( $_GET['aqm_update'] ) || ! current_user_can( 'update_plugins' ) ) {
 		return;
 	}
 
-	$status  = sanitize_key( wp_unslash( $_GET['aqm_cf_update'] ) );
-	$release = aqm_cf_github_release();
+	$status  = sanitize_key( wp_unslash( $_GET['aqm_update'] ) );
+	$release = aqm_github_release();
 
 	if ( 'available' === $status && $release ) {
 		$class   = 'notice-warning';
-		$message = sprintf(
-			/* translators: %s: version number */
-			__( 'Version %s of the contact form is available. Refresh this page and use the update link on the plugin row.', 'aqm-contact-form' ),
-			$release['version']
-		);
+		$message = 'Version ' . $release['version'] . ' of the contact form is available. Refresh this page and use the update link on the plugin row.';
 	} elseif ( 'current' === $status ) {
 		$class   = 'notice-success';
-		$message = sprintf(
-			/* translators: %s: version number */
-			__( 'The contact form is up to date (version %s).', 'aqm-contact-form' ),
-			AQM_CF_VERSION
-		);
+		$message = 'The contact form is up to date (version ' . AQM_VERSION . ').';
 	} else {
 		$class   = 'notice-error';
-		$message = __( 'Could not reach GitHub to check for contact form updates. Please try again shortly.', 'aqm-contact-form' );
+		$message = 'Could not reach GitHub to check for contact form updates. Please try again shortly.';
 	}
 
 	echo '<div class="notice ' . esc_attr( $class ) . ' is-dismissible"><p>' . esc_html( $message ) . '</p></div>';
 }
 
-/* ═══════════════════════════════════════════════════════════════════════
+/* ══════════════════════════════════════════════════════════════
    14. UNINSTALL
-   ═══════════════════════════════════════════════════════════════════════ */
+   ══════════════════════════════════════════════════════════════ */
 
-register_uninstall_hook( __FILE__, 'aqm_cf_uninstall' );
+register_uninstall_hook( __FILE__, 'aqm_uninstall' );
 
-function aqm_cf_uninstall() {
-	$settings = (array) get_option( 'aqm_cf_settings', array() );
-	if ( empty( $settings['delete_on_uninstall'] ) ) {
+function aqm_uninstall() {
+	if ( ! get_option( 'aqm_delete_on_uninstall' ) ) {
 		return;
 	}
 
 	global $wpdb;
-	$entries = $wpdb->prefix . 'aqm_contact_entries';
-	$types   = $wpdb->prefix . 'aqm_event_types';
 
-	$wpdb->query( "DROP TABLE IF EXISTS $entries" ); // phpcs:ignore WordPress.DB.PreparedSQL
-	$wpdb->query( "DROP TABLE IF EXISTS $types" );   // phpcs:ignore WordPress.DB.PreparedSQL
+	foreach ( array( 'contact_entries', 'field_options', 'form_fields', 'forms' ) as $name ) {
+		$table = $wpdb->prefix . 'aqm_' . $name;
+		$wpdb->query( "DROP TABLE IF EXISTS $table" ); // phpcs:ignore
+	}
 
-	delete_option( 'aqm_cf_settings' );
-	delete_option( 'aqm_cf_db_version' );
-	delete_option( 'aqm_cf_seeded' );
+	delete_option( 'aqm_db_version' );
+	delete_option( 'aqm_seeded' );
+	delete_option( 'aqm_proxy_header' );
+	delete_option( 'aqm_rate_limit' );
+	delete_option( 'aqm_delete_on_uninstall' );
 }

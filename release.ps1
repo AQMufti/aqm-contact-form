@@ -6,7 +6,7 @@
         powershell -ExecutionPolicy Bypass -File release.ps1
 
     It reads the version out of the plugin header, checks that the
-    AQM_CF_VERSION constant agrees with it, builds a correctly-structured
+    AQM_VERSION constant agrees with it, builds a correctly-structured
     ZIP, and publishes a GitHub release with that ZIP attached.
 
     Requires the GitHub CLI:  winget install --id GitHub.cli
@@ -68,16 +68,16 @@ if (-not $headerMatch) {
 }
 $version = $headerMatch.Matches[0].Groups[1].Value.Trim()
 
-$constPattern = "AQM_CF_VERSION',\s*'([^']+)'"
+$constPattern = "AQM_VERSION',\s*'([^']+)'"
 $constMatch = Select-String -Path $pluginFile -Pattern $constPattern | Select-Object -First 1
 if (-not $constMatch) {
-    Fail "Could not find the AQM_CF_VERSION constant."
+    Fail "Could not find the AQM_VERSION constant."
 }
 $constVersion = $constMatch.Matches[0].Groups[1].Value.Trim()
 
 # This is the mistake that silently breaks updates, so refuse to build.
 if ($version -ne $constVersion) {
-    Fail "Version mismatch: the header says $version but AQM_CF_VERSION says $constVersion. Make them match, then run this again."
+    Fail "Version mismatch: the header says $version but AQM_VERSION says $constVersion. Make them match, then run this again."
 }
 
 $tag = "v$version"
