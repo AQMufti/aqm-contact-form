@@ -3,7 +3,7 @@
  * Plugin Name:       A. Q. Mufti - Contact Form
  * Plugin URI:        https://github.com/AQMufti/aqm-contact-form
  * Description:       Multi-form builder with combobox fields. Each form has independent fields, dropdowns, editable comboboxes, CAPTCHA, spam protection and required/optional settings. Shortcode: [aqm_form id="N"]
- * Version:           7.2.0
+ * Version:           7.3.0
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            A. Q. Mufti
@@ -16,8 +16,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'AQM_VERSION', '7.2.0' );
-define( 'AQM_DB_VERSION', 8 );
+define( 'AQM_VERSION', '7.3.0' );
+define( 'AQM_DB_VERSION', 9 );
 define( 'AQM_FILE', __FILE__ );
 
 if ( ! defined( 'AQM_GITHUB_REPO' ) ) {
@@ -92,6 +92,10 @@ function aqm_install() {
 			required tinyint(1) NOT NULL default 1,
 			enabled tinyint(1) NOT NULL default 1,
 			sort_order int(11) NOT NULL default 0,
+			num_whole tinyint(1) NOT NULL default 1,
+			num_min varchar(20) NOT NULL default '',
+			num_max varchar(20) NOT NULL default '',
+			num_default varchar(20) NOT NULL default '',
 			PRIMARY KEY  (id),
 			KEY form_id (form_id)
 		) $charset;"
@@ -274,6 +278,156 @@ function aqm_get_options( $field_id ) {
 	global $wpdb;
 	$table = aqm_table( 'field_options' );
 	return $wpdb->get_results( $wpdb->prepare( "SELECT * FROM $table WHERE field_id = %d ORDER BY sort_order ASC, id ASC", $field_id ) ); // phpcs:ignore
+}
+
+
+/* ══════════════════════════════════════════════════════════════
+   NUMBER FIELDS - whole numbers, range, default
+
+   A count of people cannot be 3.5. Before 7.3.0 the only check on a
+   number field was is_numeric(), so "0", "-5" and "3.7" all passed and a
+   registration for three and a half guests would reach the caterer.
+
+   Every number field now carries four settings. "Whole numbers only" is
+   ON by default, because on most forms a number is a count.
+
+   THE LABEL IS ONLY A SUGGESTION. aqm_guess_whole_number() reads the
+   label to pre-set the CHECKBOX when a field is created. It is never
+   consulted when a submission is validated. That distinction matters: a
+   guess that writes into a control you can see and change is auditable,
+   while one evaluated silently at submit time is not. When it guesses
+   wrong you untick a box - you do not debug a word list.
+   ══════════════════════════════════════════════════════════════ */
+
+/** Words that mean the number can carry a fraction. */
+function aqm_fraction_words() {
+	return array(
+		'average', 'avg', 'mean', 'median', 'rate', 'ratio', 'percent', 'percentage',
+		'amount', 'price', 'cost', 'fee', 'salary', 'budget', 'donation', 'discount',
+		'tax', 'balance', 'dollar', 'dollars', 'weight', 'height', 'width', 'length',
+		'distance', 'temperature', 'score', 'gpa', 'factor', 'index', 'dose', 'dosage',
+		'kg', 'lb', 'lbs', 'gram', 'grams', 'km', 'mile', 'miles', 'litre', 'litres',
+		'liter', 'liters', 'gallon', 'gallons', 'hour', 'hours', 'hrs', 'minute',
+		'minutes', 'per',
+	);
+}
+
+/**
+ * Phrases that mean it is a count even when a fraction word is also present.
+ * "Total number of guests" is a count; "total" on its own is not.
+ */
+function aqm_count_phrases() {
+	return array( 'how many', 'number of', 'no. of', '# of' );
+}
+
+/**
+ * Guess whether a number field should accept whole numbers only.
+ *
+ * Default TRUE. A fraction word turns it off; a counting phrase turns it back
+ * on, being the more specific signal.
+ *
+ * @param string $label Field label.
+ * @return int 1 or 0.
+ */
+function aqm_guess_whole_number( $label ) {
+	$t = aqm_norm_label( $label );
+
+	foreach ( aqm_count_phrases() as $phrase ) {
+		if ( false !== strpos( $t, trim( aqm_norm_label( $phrase ) ) ) ) {
+			return 1;
+		}
+	}
+
+	if ( false !== strpos( $t, '%' ) ) {
+		return 0;
+	}
+
+	foreach ( aqm_fraction_words() as $word ) {
+		// The surrounding spaces ARE the word boundary. Without them "per"
+		// matches "person" and every count field silently allows decimals.
+		if ( false !== strpos( $t, ' ' . $word . ' ' ) ) {
+			return 0;
+		}
+	}
+
+	return 1;
+}
+
+/**
+ * Lower-case, and reduce anything that is not a letter, digit or % to a single
+ * space, padded at both ends. The builder's JavaScript normalises identically,
+ * so the checkbox it pre-sets always agrees with what this function decides.
+ *
+ * @param string $text Raw text.
+ * @return string
+ */
+/**
+ * Check a submitted number against the field's settings.
+ *
+ * The min/max/step attributes on the input are a courtesy to the visitor.
+ * They are not validation - anything at all can be POSTed - so this is where
+ * it is actually enforced. Kept separate from aqm_handle_submission() so it
+ * can be tested on its own.
+ *
+ * @param object $f   Field row.
+ * @param string $val Raw submitted value.
+ * @return array{error:string,value:string}
+ */
+function aqm_validate_number( $f, $val ) {
+	$raw  = trim( (string) $val );
+	$fail = static function ( $msg ) {
+		return array( 'error' => $msg, 'value' => '' );
+	};
+
+	if ( ! is_numeric( $raw ) ) {
+		return $fail( 'Please enter a number for "' . $f->label . '".' );
+	}
+
+	$num   = $raw + 0;
+	$whole = 1 === (int) aqm_num_opt( $f, 'num_whole', 1 );
+
+	if ( $whole && floor( $num ) != $num ) { // phpcs:ignore
+		return $fail( 'Please enter a whole number for "' . $f->label . '" - no decimals.' );
+	}
+
+	$min = aqm_num_opt( $f, 'num_min', '' );
+	$max = aqm_num_opt( $f, 'num_max', '' );
+
+	// The editor drops an impossible range on save, but a row can also arrive
+	// by other means. A maximum below the minimum can never be satisfied, so
+	// ignore it rather than reject everything the visitor types.
+	if ( '' !== $min && '' !== $max && is_numeric( $min ) && is_numeric( $max ) && $min + 0 > $max + 0 ) {
+		$max = '';
+	}
+
+	if ( '' !== $min && is_numeric( $min ) && $num < $min + 0 ) {
+		return $fail( 'Please enter ' . $min . ' or more for "' . $f->label . '".' );
+	}
+	if ( '' !== $max && is_numeric( $max ) && $num > $max + 0 ) {
+		return $fail( 'Please enter ' . $max . ' or fewer for "' . $f->label . '".' );
+	}
+
+	// Normalise. is_numeric() accepts " 5" and "1e3"; neither is what anyone
+	// means by a seat count, and both would look strange in a CSV export.
+	return array( 'error' => '', 'value' => $whole ? (string) (int) $num : (string) ( $num + 0 ) );
+}
+
+function aqm_norm_label( $text ) {
+	$text = strtolower( wp_strip_all_tags( (string) $text ) );
+	return ' ' . trim( preg_replace( '/[^a-z0-9%]+/', ' ', $text ) ) . ' ';
+}
+
+/**
+ * Read a number setting off a field row, tolerating rows that predate the
+ * 7.3.0 columns.
+ *
+ * @param object $f    Field row.
+ * @param string $prop Property name.
+ * @param mixed  $else Fallback.
+ * @return mixed
+ */
+function aqm_num_opt( $f, $prop, $else = '' ) {
+	return isset( $f->$prop ) ? $f->$prop : $else;
 }
 
 function aqm_validate_email( $email ) {
@@ -599,9 +753,13 @@ function aqm_handle_submission() {
 			}
 		}
 
-		if ( 'number' === $f->field_type && '' !== trim( (string) $val ) && ! is_numeric( $val ) ) {
-			$errors[ $key ] = 'Please enter a number.';
-			continue;
+		if ( 'number' === $f->field_type && '' !== trim( (string) $val ) ) {
+			$checked = aqm_validate_number( $f, $val );
+			if ( '' !== $checked['error'] ) {
+				$errors[ $key ] = $checked['error'];
+				continue;
+			}
+			$val = $checked['value'];
 		}
 
 		// A dropdown submits an option ID; resolve it to its label so a
@@ -1065,8 +1223,30 @@ function aqm_render_form( $atts ) {
 							</label>
 
 						<?php else : ?>
+							<?php
+							// Number fields carry their range and step. Purely a
+							// convenience - aqm_handle_submission() does the enforcing.
+							$numattr = '';
+							if ( 'number' === $f->field_type ) {
+								$nmin = aqm_num_opt( $f, 'num_min', '' );
+								$nmax = aqm_num_opt( $f, 'num_max', '' );
+								if ( 1 === (int) aqm_num_opt( $f, 'num_whole', 1 ) ) {
+									$numattr .= ' step="1" inputmode="numeric"';
+								}
+								if ( '' !== $nmin ) {
+									$numattr .= ' min="' . esc_attr( $nmin ) . '"';
+								}
+								if ( '' !== $nmax ) {
+									$numattr .= ' max="' . esc_attr( $nmax ) . '"';
+								}
+								if ( '' === $value ) {
+									$value = (string) aqm_num_opt( $f, 'num_default', '' );
+								}
+							}
+							?>
 							<input type="<?php echo esc_attr( $f->field_type ); ?>"
 								id="<?php echo esc_attr( $id ); ?>" name="<?php echo esc_attr( $name ); ?>"
+								<?php echo $numattr; // phpcs:ignore ?>
 								maxlength="200"
 								placeholder="<?php echo esc_attr( $f->placeholder ); ?>"
 								value="<?php echo esc_attr( $value ); ?>"
@@ -1242,6 +1422,33 @@ function aqm_admin_scripts( $hook ) {
 			}
 			bind("#aqm-fields-sortable","aqm_save_field_order","tr","#aqm-order-status");
 			bind("#aqm-options-sortable","aqm_save_option_order","li","#aqm-opt-order-status");
+
+			/* Number options: shown only for Number fields, with "whole numbers
+			   only" pre-set from the label. The guess stops the moment the user
+			   touches the box - after that the choice is theirs. Normalising the
+			   same way aqm_norm_label() does keeps the two in agreement. */
+			var FRAC=' . wp_json_encode( array_values( aqm_fraction_words() ) ) . ',
+			    CNT=' . wp_json_encode( array_values( aqm_count_phrases() ) ) . ';
+			var $t=$("#aqm_field_type"),$box=$("#aqm-num-opts"),
+			    $whole=$("#aqm_num_whole"),$lab=$("#aqm_field_label");
+			if($t.length&&$box.length){
+				var touched=false;
+				$whole.on("change",function(){touched=true;});
+				function norm(s){return " "+String(s||"").toLowerCase().replace(/[^a-z0-9%]+/g," ").replace(/^ +| +$/g,"")+" ";}
+				function guess(){
+					var t=norm($lab.val()),i;
+					for(i=0;i<CNT.length;i++){if(t.indexOf(norm(CNT[i]).replace(/^ +| +$/g,""))>-1)return true;}
+					if(t.indexOf("%")>-1)return false;
+					for(i=0;i<FRAC.length;i++){if(t.indexOf(" "+FRAC[i]+" ")>-1)return false;}
+					return true;
+				}
+				function sync(){
+					var isNum=$t.val()==="number";
+					$box.toggle(isNum);
+					if(isNum&&!touched){$whole.prop("checked",guess());}
+				}
+				$t.on("change",sync);$lab.on("input",sync);sync();
+			}
 		});'
 	);
 
@@ -1636,6 +1843,25 @@ function aqm_admin_builder_page() {
 		$req   = empty( $_POST['aqm_field_required'] ) ? 0 : 1;
 		$edit  = (int) ( $_POST['aqm_edit_id'] ?? 0 );
 
+		// Number settings. The editor only shows these for Number fields, but a
+		// field can be switched to Number from another type, in which case the
+		// block was never rendered - fall back to the label guess rather than
+		// silently leaving a count able to accept 3.5.
+		$has_num = isset( $_POST['aqm_num_submitted'] );
+		$whole   = $has_num ? ( empty( $_POST['aqm_num_whole'] ) ? 0 : 1 ) : aqm_guess_whole_number( $label );
+		$numclean = static function ( $k ) {
+			$v = isset( $_POST[ $k ] ) ? trim( sanitize_text_field( wp_unslash( $_POST[ $k ] ) ) ) : ''; // phpcs:ignore
+			return is_numeric( $v ) ? $v : '';
+		};
+		$nmin = $numclean( 'aqm_num_min' );
+		$nmax = $numclean( 'aqm_num_max' );
+		$ndef = $numclean( 'aqm_num_default' );
+
+		// A minimum above the maximum can never be satisfied - drop the max.
+		if ( '' !== $nmin && '' !== $nmax && $nmin + 0 > $nmax + 0 ) {
+			$nmax = '';
+		}
+
 		// Only field types this plugin can actually render.
 		if ( ! array_key_exists( $type, aqm_field_types() ) ) {
 			$type = 'text';
@@ -1653,9 +1879,13 @@ function aqm_admin_builder_page() {
 					'field_type'  => $type,
 					'placeholder' => $ph,
 					'required'    => $req,
+					'num_whole'   => $whole,
+					'num_min'     => $nmin,
+					'num_max'     => $nmax,
+					'num_default' => $ndef,
 				),
 				array( 'id' => $edit, 'form_id' => $form_id ),
-				array( '%s', '%s', '%s', '%d' ),
+				array( '%s', '%s', '%s', '%d', '%d', '%s', '%s', '%s' ),
 				array( '%d', '%d' )
 			);
 		} else {
@@ -1671,8 +1901,12 @@ function aqm_admin_builder_page() {
 					'required'    => $req,
 					'enabled'     => 1,
 					'sort_order'  => $max + 1,
+					'num_whole'   => $whole,
+					'num_min'     => $nmin,
+					'num_max'     => $nmax,
+					'num_default' => $ndef,
 				),
-				array( '%d', '%s', '%s', '%s', '%s', '%d', '%d', '%d' )
+				array( '%d', '%s', '%s', '%s', '%s', '%d', '%d', '%d', '%d', '%s', '%s', '%s' )
 			);
 		}
 
@@ -1957,6 +2191,41 @@ function aqm_admin_builder_page() {
 								Mark as Required
 							</label>
 						</p>
+
+						<?php
+						// Shown only for Number fields - the inline script in
+						// aqm_admin_scripts() toggles it and pre-sets the checkbox
+						// from the label. See aqm_guess_whole_number().
+						$nf_whole = $editing_field ? (int) aqm_num_opt( $editing_field, 'num_whole', 1 ) : 1;
+						?>
+						<input type="hidden" name="aqm_num_submitted" value="1">
+						<div id="aqm-num-opts" style="display:none;border:1px solid #dcdcde;border-radius:4px;padding:12px 14px;margin-bottom:12px;background:#fbfcfb">
+							<p style="margin:0 0 10px">
+								<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:600">
+									<input type="checkbox" id="aqm_num_whole" name="aqm_num_whole" value="1" <?php checked( 1, $nf_whole ); ?>>
+									Whole numbers only
+								</label>
+								<span class="description" style="display:block;margin-left:26px">Tick for a count &mdash; people, seats, tickets. Untick for money, weights or an average.</span>
+							</p>
+							<p style="display:flex;gap:10px;flex-wrap:wrap;margin:0">
+								<span style="flex:1 1 90px">
+									<label for="aqm_num_min" style="font-weight:600">Minimum</label>
+									<input type="number" step="any" id="aqm_num_min" name="aqm_num_min" style="width:100%"
+										value="<?php echo esc_attr( $editing_field ? aqm_num_opt( $editing_field, 'num_min', '' ) : '' ); ?>">
+								</span>
+								<span style="flex:1 1 90px">
+									<label for="aqm_num_max" style="font-weight:600">Maximum</label>
+									<input type="number" step="any" id="aqm_num_max" name="aqm_num_max" style="width:100%"
+										value="<?php echo esc_attr( $editing_field ? aqm_num_opt( $editing_field, 'num_max', '' ) : '' ); ?>">
+								</span>
+								<span style="flex:1 1 90px">
+									<label for="aqm_num_default" style="font-weight:600">Default</label>
+									<input type="number" step="any" id="aqm_num_default" name="aqm_num_default" style="width:100%"
+										value="<?php echo esc_attr( $editing_field ? aqm_num_opt( $editing_field, 'num_default', '' ) : '' ); ?>">
+								</span>
+							</p>
+							<p class="description" style="margin:8px 0 0">Leave blank for no limit. These are enforced on the server, not just in the browser.</p>
+						</div>
 						<p style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
 							<?php submit_button( $editing_field ? 'Update' : 'Add Field', 'primary', 'submit', false ); ?>
 							<?php if ( $editing_field ) : ?>
