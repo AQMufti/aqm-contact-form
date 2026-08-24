@@ -3,7 +3,7 @@
  * Plugin Name:       A. Q. Mufti - Contact Form
  * Plugin URI:        https://github.com/AQMufti/aqm-contact-form
  * Description:       Multi-form builder with combobox fields. Each form has independent fields, dropdowns, editable comboboxes, CAPTCHA, spam protection and required/optional settings. Shortcode: [aqm_form id="N"]
- * Version:           7.1.1
+ * Version:           7.2.0
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            A. Q. Mufti
@@ -16,7 +16,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'AQM_VERSION', '7.1.1' );
+define( 'AQM_VERSION', '7.2.0' );
 define( 'AQM_DB_VERSION', 8 );
 define( 'AQM_FILE', __FILE__ );
 
@@ -1198,6 +1198,7 @@ function aqm_notice_text( $code ) {
 		'option_deleted'  => array( 'success', 'Option deleted.' ),
 		'option_empty'    => array( 'error', 'The option label cannot be empty.' ),
 		'entries_deleted' => array( 'success', 'Selected submissions deleted.' ),
+		'ips_purged'      => array( 'success', 'Stored IP addresses cleared. No submissions were deleted.' ),
 		'delete_failed'   => array( 'error', 'The submissions could not be deleted - a database error was logged.' ),
 		'nothing_picked'  => array( 'error', 'Nothing was selected.' ),
 	);
@@ -2291,9 +2292,95 @@ function aqm_csv_safe( $value ) {
    12. ADMIN PAGE - Global settings
    ══════════════════════════════════════════════════════════════ */
 
+/* ══════════════════════════════════════════════════════════════
+   STORED IP ADDRESSES
+
+   A form only writes an IP when its "store IP" box is ticked. Turning that
+   off stops new ones being written but leaves whatever is already in the
+   table, and nothing in this plugin ages rows out - there is no cron. This
+   is the cleanup.
+
+   It clears the ip_address column and nothing else. Names, messages, form
+   data and dates are untouched; no row is deleted. '' is exactly what
+   aqm_handle_submission() writes when store_ip is off, so a purged row ends
+   up identical to a new one. The column is NOT NULL default '', so NULL
+   would error - the empty string is the correct value, not a shortcut.
+
+   The rate-limit transients (aqm_rl_<md5(ip)>) are deliberately left alone.
+   They are hashed, they expire after an hour on their own, and clearing
+   them mid-flood would hand a spammer a fresh allowance.
+   ══════════════════════════════════════════════════════════════ */
+
+function aqm_entries_table_exists() {
+	global $wpdb;
+	$table = aqm_table( 'contact_entries' );
+	return $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) === $table;
+}
+
+function aqm_count_stored_ips() {
+	global $wpdb;
+	if ( ! aqm_entries_table_exists() ) {
+		return null;
+	}
+	$table = aqm_table( 'contact_entries' );
+	return (int) $wpdb->get_var( "SELECT COUNT(*) FROM `{$table}` WHERE ip_address <> ''" );
+}
+
+function aqm_purge_stored_ips() {
+	global $wpdb;
+	if ( ! aqm_entries_table_exists() ) {
+		return 0;
+	}
+	$table = aqm_table( 'contact_entries' );
+
+	// The WHERE keeps the affected-row count meaningful and avoids rewriting
+	// rows that are already empty.
+	return (int) $wpdb->query( "UPDATE `{$table}` SET ip_address = '' WHERE ip_address <> ''" );
+}
+
+function aqm_render_ip_purge_box() {
+	$count = aqm_count_stored_ips();
+	if ( null === $count ) {
+		return;   // No entries table yet - nothing to offer.
+	}
+	?>
+	<h2>Stored IP addresses</h2>
+	<table class="form-table" role="presentation">
+		<tr>
+			<th scope="row">Currently stored</th>
+			<td>
+				<?php if ( 0 === $count ) : ?>
+					<p><strong>None.</strong> No submission is holding an IP address.</p>
+				<?php else : ?>
+					<p><strong><?php echo esc_html( number_format_i18n( $count ) ); ?></strong>
+					<?php echo 1 === $count ? 'submission is' : 'submissions are'; ?> holding an IP address.</p>
+				<?php endif; ?>
+				<p class="description">
+					Clearing removes the IP address only. Names, messages, form data and dates are kept &mdash; no submission is deleted.
+					<br>Spam protection is unaffected: rate limiting uses a scrambled, self-expiring counter, not this column.
+				</p>
+				<?php if ( $count > 0 ) : ?>
+					<form method="post" onsubmit="return confirm('Clear the stored IP address from every submission? The submissions themselves are kept. This cannot be undone.');">
+						<?php wp_nonce_field( 'aqm_purge_ips', 'aqm_purge_nonce' ); ?>
+						<p><button type="submit" class="button button-secondary">Clear all stored IP addresses</button></p>
+					</form>
+				<?php endif; ?>
+			</td>
+		</tr>
+	</table>
+	<?php
+}
+
 function aqm_admin_settings_page() {
 	if ( ! current_user_can( 'manage_options' ) ) {
 		wp_die( 'You do not have permission to view this page.' );
+	}
+
+	if ( isset( $_POST['aqm_purge_nonce'] ) ) {
+		check_admin_referer( 'aqm_purge_ips', 'aqm_purge_nonce' );
+		aqm_purge_stored_ips();
+		wp_safe_redirect( add_query_arg( 'aqm_msg', 'ips_purged', admin_url( 'admin.php?page=aqm-settings' ) ) );
+		exit;
 	}
 
 	if ( isset( $_POST['aqm_global_nonce'] ) ) {
@@ -2361,6 +2448,8 @@ function aqm_admin_settings_page() {
 
 			<?php submit_button(); ?>
 		</form>
+
+		<?php aqm_render_ip_purge_box(); ?>
 	</div>
 	<?php
 }

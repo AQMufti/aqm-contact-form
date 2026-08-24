@@ -1,0 +1,90 @@
+# AQM Contact Form plugin — state and release process
+
+*Last updated: 23 August 2026*
+
+The custom WordPress contact form plugin used on interfaithcouncilhalton.com. Written by A. Q. Mufti; general-purpose, not ICH-specific.
+
+## Current state
+
+- **Live version:** 7.1.1, active on interfaithcouncilhalton.com
+- **Repo:** https://github.com/AQMufti/aqm-contact-form (public), latest release `v7.1.1`
+- **Local working folder:** `C:\AQMProjects\aqm-contact-form`
+- **Server path:** `/wp-content/plugins/aqm-contact-form/aqmcontactform.php`
+- **Shortcode:** `[aqm_form id="N"]`
+
+Single-file plugin (~2,500 lines). Multi-form builder: unlimited forms, each with its own fields, dropdown options, editable comboboxes, recipient, subject, CAPTCHA and spam settings. Ten field types. Drag-and-drop field ordering.
+
+## OPEN ISSUE — outbound email not working
+
+**Status at last update: Hostinger support investigating.**
+
+WP Mail SMTP 4.9.0 is installed and configured for Titan (`smtp.titan.email`, port 465, SSL, username `info@interfaithcouncilhalton.com`, Force From Email ON). The connection succeeds but authentication fails:
+
+```
+SERVER -> CLIENT: 220 smtp-out.flockmail.com ESMTP Postfix
+CLIENT -> SERVER: AUTH LOGIN
+SERVER -> CLIENT: 535 5.7.8 Error: authentication failed
+```
+
+The password is confirmed working in Titan webmail, so the credentials themselves are valid. Leading theory: Titan blocks the hosting server's outbound IP after repeated failed login attempts ([Titan's own documentation](https://support.titan.email/hc/en-us/articles/4416516446873-ESMTP-not-accepting-connections) names this). Hostinger reported a larger underlying problem and is investigating.
+
+**Do not keep retrying the test email** — repeated failures can extend an IP block.
+
+**Fallback if Hostinger can't resolve it:** switch the WP Mail SMTP mailer to **Brevo** (free, 300 emails/day, built-in mailer option). Requires a Brevo account, sender verification of `info@`, and an API key. Bypasses Titan entirely for sending; `info@` still receives normally.
+
+**Meanwhile nothing is being lost.** Every submission is written to the database before mail is attempted, and a dashboard notice appears when `wp_mail()` fails. Check **AQM Contact → Submissions** for enquiries until sending works.
+
+## Lineage — important
+
+Two unrelated code lines share the name:
+
+- **2.x** — a single simple form, shortcode `[aqm_contact_form]`. Superseded and abandoned. A hardened 2.3.0 was built and released before it emerged the live site ran 7.0.0. **Do not install anything 2.x.**
+- **7.x** — the multi-form builder actually in use. 7.1.0/7.1.1 are hardened rewrites of 7.0.0 with every feature preserved.
+
+Repo tags `v2.3.0` and earlier belong to the dead 2.x line. `v7.1.1` onward is the live lineage.
+
+## What 7.1.x fixed in 7.0.0
+
+- `SHOW COLUMNS` ran on `plugins_loaded` for every request, front end included — replaced with a stored schema version
+- Submissions processed inside the shortcode, so a browser refresh re-filed them — moved to `template_redirect` with Post/Redirect/Get
+- No `wp_unslash()` anywhere — apostrophes were stored escaped (`O\'Brien`)
+- Validation stopped at the first error and showed one generic message — now per-field errors with ARIA wiring
+- `wp_mail()` return value ignored — now logged, with a dashboard notice
+- Submissions query had no `LIMIT` — now paginated, searchable, with bulk delete and per-form CSV export (formula-injection safe)
+- `dbDelta` called with `IF NOT EXISTS`, so schema upgrades never applied
+
+Added: honeypot and timing traps alongside the CAPTCHA, per-IP rate limiting, auto-reply, cache headers, proxy-header setting, GitHub self-updater.
+
+The HMAC-signed maths CAPTCHA from 7.0.0 was kept as-is — it was well built.
+
+7.1.1 removed an `upgrader_source_selection` filter added in 7.1.0 that corrupted the install path.
+
+## Releasing a new version
+
+From `C:\AQMProjects\aqm-contact-form`:
+
+```
+git add . && git commit -m "what changed" && git push
+powershell -ExecutionPolicy Bypass -File release.ps1
+```
+
+Bump **both** the `Version:` header and the `AQM_VERSION` constant first — they must match, and `release.ps1` refuses to build if they disagree.
+
+The script builds the ZIP, checks the tag doesn't exist, and publishes the GitHub release with the ZIP attached. Attaching the ZIP matters: GitHub's automatic source download names its folder after the commit, which installs a duplicate instead of updating.
+
+## Installing on the site — use file replacement, not the uploader
+
+**The WordPress plugin uploader is unreliable on this host.** It hung repeatedly in Opera and Chrome. One upload that did complete produced a file literally named `aqm-contact-form\aqmcontactform.php` — a backslash in the filename rather than a folder — which deactivated the plugin. (`mod_security` is reported as *not* active, so the cause is still unidentified.)
+
+**Reliable method:** Hostinger File Manager → `/wp-content/plugins/aqm-contact-form/` → upload `aqmcontactform.php`, overwriting. WordPress reads it on the next page load; no deactivation needed. Because it is a single-file plugin, replacing that file *is* the update.
+
+## Site-specific notes
+
+- **LiteSpeed / QUIC.cloud caching is active.** The plugin sets `DONOTCACHEPAGE` on pages with the shortcode. If "your session expired" ever appears on a form, add that page under LiteSpeed Cache → Cache → Excludes → Do Not Cache URIs.
+- Notification address and all per-form options live under **AQM Contact → Form Builder → Form Settings**. Site-wide options (rate limit, proxy header, uninstall) under **AQM Contact → Settings**.
+
+## Data
+
+Four tables, all prefixed `wp_aqm_`: `forms`, `form_fields`, `field_options`, `contact_entries`. Submissions are stored as JSON in `contact_entries.form_data`. Data survives deactivation and deletion unless "Delete all forms and submissions" is ticked in Settings.
+
+Submissions are the only irreplaceable data here — worth a periodic CSV export or a backup of those tables.

@@ -102,9 +102,47 @@ try {
     New-Item -ItemType Directory -Path $target -Force | Out-Null
     Copy-Item $pluginFile -Destination $target
 
-    # Pointing at the folder (not its contents) keeps the aqm-contact-form
-    # directory inside the ZIP, which is what WordPress needs to update in place.
-    Compress-Archive -Path $target -DestinationPath $zipPath -Force
+    # DO NOT use Compress-Archive here.
+    #
+    # On Windows PowerShell it writes ZIP entry names with a BACKSLASH
+    # separator, because .NET Framework before 4.6.1 sets
+    # ZipArchiveEntry.FullName that way. WordPress then unpacks a single file
+    # literally named  aqm-contact-form\aqmcontactform.php  instead of a
+    # folder containing the plugin, and the plugin deactivates itself. That is
+    # exactly what happened on the 7.1.x upload and had to be fixed by hand.
+    #
+    # Build the archive entry by entry instead, forcing forward slashes, which
+    # is what section 4.4.17.1 of the ZIP specification requires anyway.
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+    $zip = [System.IO.Compression.ZipFile]::Open($zipPath, 'Create')
+    try {
+        foreach ($file in (Get-ChildItem -Path $target -File -Recurse)) {
+            $relative = $file.FullName.Substring($buildDir.Length + 1).Replace('\', '/')
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                $zip, $file.FullName, $relative,
+                [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+        }
+    }
+    finally {
+        $zip.Dispose()
+    }
+
+    # Prove it, rather than trust it. This is the check that would have caught
+    # the 7.1.x problem before it reached the site.
+    $verify  = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+    $entries = @($verify.Entries | ForEach-Object { $_.FullName })
+    $verify.Dispose()
+
+    $bad = @($entries | Where-Object { $_.Contains('\') })
+    if ($bad.Count -gt 0) {
+        Fail "The ZIP contains backslash path separators: $($bad -join ', '). WordPress would install a broken file. Do not upload it."
+    }
+    if (-not ($entries -contains "$slug/aqmcontactform.php")) {
+        Fail "The ZIP does not contain $slug/aqmcontactform.php. Found: $($entries -join ', ')"
+    }
+
     Remove-Item $buildDir -Recurse -Force
 }
 catch {
@@ -114,7 +152,7 @@ catch {
 $ErrorActionPreference = 'Continue'
 
 $sizeKb = [math]::Round((Get-Item $zipPath).Length / 1KB, 1)
-Write-Host "  Built:    $slug.zip, $sizeKb KB" -ForegroundColor Green
+Write-Host "  Built:    $slug.zip, $sizeKb KB - entry paths verified" -ForegroundColor Green
 
 # --- Publish ----------------------------------------------------------------
 
