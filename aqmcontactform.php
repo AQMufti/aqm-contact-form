@@ -2,8 +2,8 @@
 /**
  * Plugin Name:       A. Q. Mufti - Contact Form
  * Plugin URI:        https://github.com/AQMufti/aqm-contact-form
- * Description:       Multi-form builder with combobox fields. Each form has independent fields, dropdowns, editable comboboxes, CAPTCHA, spam protection and required/optional settings. Shortcode: [aqm_form id="N"]
- * Version:           7.3.0
+ * Description:       Multi-form builder. Each form has independent fields, dropdowns, editable comboboxes, multi-pick checkbox groups, per-field help text, default values, CAPTCHA, spam protection and required/optional settings. Shortcode: [aqm_form id="N"]
+ * Version:           7.4.0
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            A. Q. Mufti
@@ -16,8 +16,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'AQM_VERSION', '7.3.0' );
-define( 'AQM_DB_VERSION', 9 );
+define( 'AQM_VERSION', '7.4.0' );
+define( 'AQM_DB_VERSION', 10 );
 define( 'AQM_FILE', __FILE__ );
 
 if ( ! defined( 'AQM_GITHUB_REPO' ) ) {
@@ -69,6 +69,7 @@ function aqm_install() {
 			notify_email varchar(120) NOT NULL default '',
 			notify_cc varchar(255) NOT NULL default '',
 			email_subject varchar(200) NOT NULL default 'New Contact Form Submission',
+			form_intro text NOT NULL,
 			captcha_enabled tinyint(1) NOT NULL default 1,
 			spam_protection tinyint(1) NOT NULL default 1,
 			autoreply_enabled tinyint(1) NOT NULL default 0,
@@ -89,6 +90,8 @@ function aqm_install() {
 			label varchar(120) NOT NULL,
 			field_type varchar(30) NOT NULL default 'text',
 			placeholder varchar(200) NOT NULL default '',
+			help_text varchar(300) NOT NULL default '',
+			default_value varchar(200) NOT NULL default '',
 			required tinyint(1) NOT NULL default 1,
 			enabled tinyint(1) NOT NULL default 1,
 			sort_order int(11) NOT NULL default 0,
@@ -153,6 +156,7 @@ function aqm_seed_default_form( $form_name = 'General Contact Form' ) {
 			'form_name'         => $form_name,
 			'notify_email'      => get_option( 'admin_email' ),
 			'email_subject'     => 'New Contact Form Submission',
+			'form_intro'        => '',
 			'captcha_enabled'   => 1,
 			'spam_protection'   => 1,
 			'autoreply_enabled' => 0,
@@ -162,7 +166,7 @@ function aqm_seed_default_form( $form_name = 'General Contact Form' ) {
 			'store_ip'          => 1,
 			'created_at'        => current_time( 'mysql' ),
 		),
-		array( '%s', '%s', '%s', '%d', '%d', '%d', '%s', '%s', '%s', '%d', '%s' )
+		array( '%s', '%s', '%s', '%s', '%d', '%d', '%d', '%s', '%s', '%s', '%d', '%s' )
 	);
 
 	$form_id = (int) $wpdb->insert_id;
@@ -174,33 +178,35 @@ function aqm_seed_default_form( $form_name = 'General Contact Form' ) {
 function aqm_seed_default_fields( $form_id ) {
 	global $wpdb;
 
+	/* Each seed carries its own option list, so a new field type never means
+	   editing a second hard-coded block somewhere below.
+
+	   'on' => 0 seeds a field HIDDEN. Dietary requirements and Allergies are
+	   wanted on registration forms and nowhere else, and most forms are not
+	   registrations - a quote request or a job enquiry should not open with
+	   two catering questions. Seeding them hidden means the lists are always
+	   THERE, already filled in, one click on the OFF badge away from being
+	   used, and invisible to visitors until someone asks for them. */
 	$fields = array(
-		array( 'name', 'Full Name', 'text', 'Your full name', 1, 1, 1 ),
-		array( 'email', 'Email Address', 'email', 'your@email.com', 1, 1, 2 ),
-		array( 'phone', 'Telephone', 'tel', '(905) 555-0100', 0, 1, 3 ),
-		array( 'event_type', 'Type of Event', 'combobox', '', 1, 1, 4 ),
-		array( 'message', 'Message', 'textarea', 'Describe your inquiry...', 1, 1, 5 ),
-	);
-
-	foreach ( $fields as $f ) {
-		$wpdb->insert(
-			aqm_table( 'form_fields' ),
-			array(
-				'form_id'     => $form_id,
-				'field_key'   => aqm_unique_key( $f[0], $form_id ),
-				'label'       => $f[1],
-				'field_type'  => $f[2],
-				'placeholder' => $f[3],
-				'required'    => $f[4],
-				'enabled'     => $f[5],
-				'sort_order'  => $f[6],
-			),
-			array( '%d', '%s', '%s', '%s', '%s', '%d', '%d', '%d' )
-		);
-
-		if ( in_array( $f[2], array( 'select', 'combobox' ), true ) ) {
-			$field_db_id = (int) $wpdb->insert_id;
-			$opts        = array(
+		array(
+			'key' => 'name', 'label' => 'Full Name', 'type' => 'text',
+			'ph' => 'Your full name', 'req' => 1, 'on' => 1, 'help' => '',
+		),
+		array(
+			'key' => 'email', 'label' => 'Email Address', 'type' => 'email',
+			'ph' => 'your@email.com', 'req' => 1, 'on' => 1,
+			'help' => 'So we can reply to you.',
+		),
+		array(
+			'key' => 'phone', 'label' => 'Telephone', 'type' => 'tel',
+			'ph' => '(905) 555-0100', 'req' => 0, 'on' => 1,
+			'help' => 'Only if you would rather we called.',
+		),
+		array(
+			'key' => 'event_type', 'label' => 'Type of Event', 'type' => 'combobox',
+			'ph' => '', 'req' => 1, 'on' => 1,
+			'help' => 'Pick the closest match, or type your own.',
+			'opts' => array(
 				'General Enquiry',
 				'Event Booking',
 				'Request a Quote',
@@ -213,18 +219,81 @@ function aqm_seed_default_fields( $form_id ) {
 				'Media or Press Enquiry',
 				'Partnership or Sponsorship',
 				'Other',
+			),
+		),
+		array(
+			'key' => 'dietary_requirements', 'label' => 'Dietary requirements',
+			'type' => 'combobox', 'ph' => '', 'req' => 0, 'on' => 0,
+			'help' => '',
+			'opts' => array(
+				'Halal',
+				'Kosher',
+				'Vegetarian',
+				'Vegan',
+				'Gluten free',
+				'Dairy free',
+				'No pork',
+				'No beef',
+				'None',
+			),
+		),
+		array(
+			'key' => 'allergies', 'label' => 'Food allergies',
+			'type' => 'multiselect', 'ph' => '', 'req' => 0, 'on' => 0,
+			'help' => 'Tick everything that applies. Add anything else in the box below.',
+			'opts' => array(
+				'Peanut',
+				'Tree nut',
+				'Shellfish',
+				'Fish',
+				'Egg',
+				'Dairy',
+				'Soy',
+				'Sesame',
+				'Wheat or gluten',
+				'None',
+			),
+		),
+		array(
+			'key' => 'message', 'label' => 'Message', 'type' => 'textarea',
+			'ph' => 'Describe your inquiry...', 'req' => 1, 'on' => 1, 'help' => '',
+		),
+	);
+
+	$sort = 0;
+	foreach ( $fields as $f ) {
+		$sort++;
+		$wpdb->insert(
+			aqm_table( 'form_fields' ),
+			array(
+				'form_id'     => $form_id,
+				'field_key'   => aqm_unique_key( $f['key'], $form_id ),
+				'label'       => $f['label'],
+				'field_type'  => $f['type'],
+				'placeholder' => $f['ph'],
+				'help_text'   => $f['help'],
+				'required'    => $f['req'],
+				'enabled'     => $f['on'],
+				'sort_order'  => $sort,
+			),
+			array( '%d', '%s', '%s', '%s', '%s', '%s', '%d', '%d', '%d' )
+		);
+
+		if ( empty( $f['opts'] ) ) {
+			continue;
+		}
+
+		$field_db_id = (int) $wpdb->insert_id;
+		foreach ( $f['opts'] as $i => $opt ) {
+			$wpdb->insert(
+				aqm_table( 'field_options' ),
+				array(
+					'field_id'   => $field_db_id,
+					'label'      => $opt,
+					'sort_order' => $i + 1,
+				),
+				array( '%d', '%s', '%d' )
 			);
-			foreach ( $opts as $i => $opt ) {
-				$wpdb->insert(
-					aqm_table( 'field_options' ),
-					array(
-						'field_id'   => $field_db_id,
-						'label'      => $opt,
-						'sort_order' => $i + 1,
-					),
-					array( '%d', '%s', '%d' )
-				);
-			}
 		}
 	}
 }
@@ -427,7 +496,27 @@ function aqm_norm_label( $text ) {
  * @return mixed
  */
 function aqm_num_opt( $f, $prop, $else = '' ) {
-	return isset( $f->$prop ) ? $f->$prop : $else;
+	return aqm_col( $f, $prop, $else );
+}
+
+/**
+ * Read a column that may not exist yet.
+ *
+ * dbDelta runs on the next admin page load, not on activation, so between an
+ * upgrade and that load a row object can be missing its newest columns. Every
+ * read of help_text, default_value, form_intro and the num_* set goes through
+ * here, so a half-upgraded site renders instead of throwing a warning.
+ *
+ * @param object $row  Row object from $wpdb.
+ * @param string $prop Column name.
+ * @param mixed  $else Value to use when the column is absent or null.
+ * @return mixed
+ */
+function aqm_col( $row, $prop, $else = '' ) {
+	if ( ! is_object( $row ) || ! isset( $row->$prop ) ) {
+		return $else;
+	}
+	return $row->$prop;
 }
 
 function aqm_validate_email( $email ) {
@@ -650,7 +739,22 @@ function aqm_handle_submission() {
 		$name = 'aqm_f' . $form_id . '_' . $f->field_key;
 		$raw  = isset( $_POST[ $name ] ) ? wp_unslash( $_POST[ $name ] ) : '';
 
-		if ( 'textarea' === $f->field_type ) {
+		if ( 'multiselect' === $f->field_type ) {
+			// Arrives as an array of ticked labels, plus one free-text box for
+			// anything not on the list. It stays an ARRAY all the way through
+			// validation: joining now and splitting later would come apart the
+			// moment an option label contains a comma. sanitize_text_field()
+			// would also raise a TypeError if handed the array directly.
+			$picked = is_array( $raw ) ? $raw : array();
+			$picked = array_slice( $picked, 0, 50 );
+			$picked = array_map( 'sanitize_text_field', array_map( 'strval', $picked ) );
+
+			$other = isset( $_POST[ $name . '_other' ] ) ? sanitize_text_field( wp_unslash( $_POST[ $name . '_other' ] ) ) : ''; // phpcs:ignore
+			if ( '' !== trim( $other ) ) {
+				$picked[] = trim( $other );
+			}
+			$values[ $f->field_key ] = $picked;
+		} elseif ( 'textarea' === $f->field_type ) {
 			$values[ $f->field_key ] = sanitize_textarea_field( $raw );
 		} elseif ( 'email' === $f->field_type ) {
 			$values[ $f->field_key ] = sanitize_email( $raw );
@@ -735,9 +839,37 @@ function aqm_handle_submission() {
 		$key = $f->field_key;
 		$val = $values[ $key ];
 
-		if ( $f->required && '' === trim( (string) $val ) ) {
-			$errors[ $key ] = 'Please complete "' . $f->label . '".';
+		if ( $f->required && aqm_value_is_blank( $val ) ) {
+			$errors[ $key ] = 'multiselect' === $f->field_type
+				? 'Please choose at least one option for "' . $f->label . '".'
+				: 'Please complete "' . $f->label . '".';
 			continue;
+		}
+
+		// Tick boxes are resolved against the real option list so a tampered
+		// value cannot store arbitrary text - except through the free-text box,
+		// which exists precisely to allow it.
+		if ( 'multiselect' === $f->field_type ) {
+			$allowed = array();
+			foreach ( aqm_get_options( $f->id ) as $opt ) {
+				$allowed[ strtolower( $opt->label ) ] = $opt->label;
+			}
+
+			$clean = array();
+			foreach ( (array) $val as $one ) {
+				$one = trim( (string) $one );
+				if ( '' === $one ) {
+					continue;
+				}
+				if ( mb_strlen( $one ) > 200 ) {
+					$one = mb_substr( $one, 0, 200 );
+				}
+				$lower = strtolower( $one );
+				// Restore the stored capitalisation for anything on the list,
+				// so "peanut" and "Peanut" never both appear in a report.
+				$clean[ $lower ] = isset( $allowed[ $lower ] ) ? $allowed[ $lower ] : $one;
+			}
+			$val = array_values( $clean );
 		}
 
 		if ( 'email' === $f->field_type && '' !== trim( (string) $val ) && ! aqm_validate_email( $val ) ) {
@@ -774,12 +906,15 @@ function aqm_handle_submission() {
 			}
 		}
 
-		if ( mb_strlen( (string) $val ) > 5000 ) {
+		if ( ! is_array( $val ) && mb_strlen( (string) $val ) > 5000 ) {
 			$errors[ $key ] = 'That is longer than 5,000 characters. Please shorten it a little.';
 			continue;
 		}
 
-		$stored[ $key ] = $val;
+		// Joined only now, at the very last moment. Everything downstream -
+		// the emails, the CSV export, the Submissions screen, the recap - keeps
+		// receiving a plain string and needs no knowledge of this type.
+		$stored[ $key ] = is_array( $val ) ? implode( ', ', $val ) : $val;
 	}
 
 	if ( $errors ) {
@@ -837,6 +972,7 @@ function aqm_handle_submission() {
 			'form_id' => $form_id,
 			'status'  => 'success',
 			'general' => aqm_success_text( $form, $stored ),
+			'summary' => aqm_recap_pairs( $fields, $stored ),
 		)
 	);
 }
@@ -881,6 +1017,110 @@ function aqm_mail_from_address() {
 	$host = wp_parse_url( home_url(), PHP_URL_HOST );
 	$host = preg_replace( '/^www\./i', '', (string) $host );
 	return apply_filters( 'aqm_from_address', 'no-reply@' . $host );
+}
+
+/**
+ * The grey line of guidance under a field.
+ *
+ * One place decides what a visitor reads, so a combobox, a number with a
+ * range, and a plain field with help text all behave the same way. Author's
+ * help text always comes first; anything generated is appended, never
+ * substituted, so writing your own wording never hides the range.
+ *
+ * @param object $f Field row.
+ * @return string Plain text, may be empty.
+ */
+/**
+ * Is this answer empty?
+ *
+ * A multiselect's value is an array right up until it is stored, so the
+ * required-field test cannot simply trim() it - PHP 8 raises a TypeError when
+ * an array is cast to string.
+ *
+ * @param mixed $val Collected value.
+ * @return bool
+ */
+function aqm_value_is_blank( $val ) {
+	if ( is_array( $val ) ) {
+		foreach ( $val as $one ) {
+			if ( '' !== trim( (string) $one ) ) {
+				return false;
+			}
+		}
+		return true;
+	}
+	return '' === trim( (string) $val );
+}
+
+function aqm_field_hint( $f ) {
+	$parts = array();
+	$help  = trim( (string) aqm_col( $f, 'help_text' ) );
+
+	if ( '' !== $help ) {
+		$parts[] = $help;
+	}
+
+	// A combobox is the one type whose behaviour is not obvious from looking
+	// at it - the list is a set of suggestions, not a closed set of answers.
+	// Say so, unless the author has already explained it in their own words.
+	if ( 'combobox' === $f->field_type && '' === $help ) {
+		$parts[] = $f->required
+			? 'Choose one from the list, or type your own.'
+			: 'Choose one from the list, or type your own. Leave blank if it does not apply.';
+	}
+
+	if ( 'multiselect' === $f->field_type && '' === $help ) {
+		$parts[] = $f->required
+			? 'Tick everything that applies, and add anything not listed in the box.'
+			: 'Tick everything that applies, or add your own in the box. Leave blank if none apply.';
+	}
+
+	// Say the range in words. Without this the visitor meets the browser's
+	// own "Value must be less than or equal to 20" only AFTER getting it
+	// wrong - this prevents the error instead of explaining it.
+	if ( 'number' === $f->field_type ) {
+		$min   = (string) aqm_num_opt( $f, 'num_min', '' );
+		$max   = (string) aqm_num_opt( $f, 'num_max', '' );
+		$range = '';
+		if ( '' !== $min && '' !== $max ) {
+			$range = 'Between ' . $min . ' and ' . $max . '.';
+		} elseif ( '' !== $min ) {
+			$range = $min . ' or more.';
+		} elseif ( '' !== $max ) {
+			$range = 'Up to ' . $max . '.';
+		}
+		// Skip it when the author's own wording already carries the numbers,
+		// so "Between 1 and 20" is never printed twice in different words.
+		if ( '' !== $range && false === stripos( $help, trim( $range, '.' ) ) ) {
+			$parts[] = $range;
+		}
+	}
+
+	return implode( ' ', $parts );
+}
+
+/**
+ * Label/value pairs to show the visitor after a successful send.
+ *
+ * Blank answers are dropped - a list of "Not provided" tells nobody anything.
+ * This is what turns "your message has been received" into "we have you down
+ * for 3 people", which is the difference between a person trusting the form
+ * and a person emailing to ask whether it worked.
+ *
+ * @param array $fields Field rows.
+ * @param array $data   Stored values, keyed by field key.
+ * @return array<int,array{0:string,1:string}>
+ */
+function aqm_recap_pairs( $fields, array $data ) {
+	$pairs = array();
+	foreach ( $fields as $f ) {
+		$value = trim( (string) ( $data[ $f->field_key ] ?? '' ) );
+		if ( '' === $value ) {
+			continue;
+		}
+		$pairs[] = array( (string) $f->label, $value );
+	}
+	return $pairs;
 }
 
 function aqm_format_submission( $fields, array $data ) {
@@ -1030,6 +1270,19 @@ function aqm_styles() {
 .aqm-form-wrap .aqm-opt{font-weight:400;text-transform:none;color:#767676;font-size:11px;letter-spacing:0}
 .aqm-form-wrap .aqm-req{color:var(--aqm-accent);font-size:14px}
 .aqm-form-wrap .aqm-hint{display:block;font-size:12px;color:#767676;margin-top:4px;font-family:Arial,sans-serif;font-style:italic}
+.aqm-form-wrap .aqm-help{display:block;font-size:12.5px;line-height:1.45;color:#5f6b64;margin-top:5px;font-family:Arial,sans-serif}
+.aqm-form-wrap .aqm-counter{display:block;font-size:11.5px;color:#8a8a8a;margin-top:4px;text-align:right;font-family:Arial,sans-serif}
+.aqm-form-wrap .aqm-counter--over{color:#b32d2e;font-weight:700}
+.aqm-form-wrap .aqm-intro{margin:0 0 20px;padding:14px 18px;background:#f6f8f4;border-left:3px solid #1a4b6e;border-radius:4px;font-size:14.5px;line-height:1.6;color:#3c4a41;font-family:Arial,sans-serif}
+.aqm-form-wrap .aqm-intro p{margin:0 0 8px}
+.aqm-form-wrap .aqm-intro p:last-child{margin-bottom:0}
+.aqm-form-wrap .aqm-recap{margin:14px 0 0;border:1px solid #dbe3dd;border-radius:4px;padding:14px 18px;background:#fbfcfb;font-family:Arial,sans-serif}
+.aqm-form-wrap .aqm-recap h4{margin:0 0 8px;font-size:12px;letter-spacing:.05em;text-transform:uppercase;color:#5f6b64}
+.aqm-form-wrap .aqm-recap dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:4px 16px;font-size:13.5px}
+.aqm-form-wrap .aqm-recap dt{color:#767676}
+.aqm-form-wrap .aqm-recap dd{margin:0;color:#2b352e;font-weight:600;word-break:break-word}
+@media(max-width:480px){.aqm-form-wrap .aqm-recap dl{grid-template-columns:1fr;gap:0 0}
+.aqm-form-wrap .aqm-recap dd{margin-bottom:8px}}
 .aqm-form-wrap .aqm-field-error{display:block;margin-top:6px;font-size:13px;color:#8c2f22;font-family:Arial,sans-serif}
 .aqm-form-wrap input:not([type=checkbox]),.aqm-form-wrap select,.aqm-form-wrap textarea{width:100%;box-sizing:border-box;padding:10px 13px;border:1px solid var(--aqm-border);border-radius:6px;background:#fff;font-size:15px;font-family:Georgia,serif;color:var(--aqm-text);transition:border-color .2s,box-shadow .2s;box-shadow:0 2px 6px rgba(0,0,0,.06)}
 .aqm-form-wrap input:focus,.aqm-form-wrap select:focus,.aqm-form-wrap textarea:focus{outline:2px solid transparent;border-color:var(--aqm-primary);box-shadow:0 0 0 3px rgba(26,75,110,.35)}
@@ -1040,6 +1293,11 @@ function aqm_styles() {
 .aqm-form-wrap .aqm-combobox-wrap input{width:100%;padding-right:38px;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='9' viewBox='0 0 14 9'%3E%3Cpath fill='%231a4b6e' d='M7 9L0 0h14z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 13px center;cursor:text}
 .aqm-form-wrap .aqm-combobox-hint{display:block;font-size:11px;color:#767676;margin-top:4px;font-family:Arial,sans-serif;font-style:italic}
 .aqm-form-wrap .aqm-chk{display:flex;align-items:center;gap:10px;cursor:pointer;font-size:15px;font-family:Georgia,serif;text-transform:none;letter-spacing:0;font-weight:400;color:var(--aqm-text)}
+.aqm-form-wrap .aqm-multi{display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:6px 18px;padding:12px 14px;border:1px solid var(--aqm-border);border-radius:6px;background:#fff;box-shadow:0 2px 6px rgba(0,0,0,.06)}
+.aqm-form-wrap .aqm-multi .aqm-chk{padding:5px 2px;min-height:34px}
+.aqm-form-wrap .aqm-group--invalid .aqm-multi{border-color:var(--aqm-error);box-shadow:0 0 0 3px rgba(192,57,43,.12)}
+.aqm-form-wrap input.aqm-multi-other{margin-top:8px}
+@media(max-width:480px){.aqm-form-wrap .aqm-multi{grid-template-columns:1fr}}
 .aqm-form-wrap .aqm-chk input{width:17px;height:17px;flex-shrink:0;cursor:pointer}
 .aqm-form-wrap .aqm-captcha-group{background:#f8f6f0;border:1px solid var(--aqm-border);border-radius:6px;padding:14px 16px;width:100%}
 .aqm-form-wrap .aqm-captcha-inner{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:2px}
@@ -1110,14 +1368,38 @@ function aqm_render_form( $atts ) {
 			<?php endif; ?>
 		</div>
 
-		<?php if ( 'success' === $status ) : ?>
-			<p class="aqm-note">If you need to send another message, please refresh this page.</p>
+		<?php
+		if ( 'success' === $status ) :
+			$recap = ( $mine && isset( $flash['summary'] ) && is_array( $flash['summary'] ) ) ? $flash['summary'] : array();
+			?>
+			<?php if ( $recap ) : ?>
+				<div class="aqm-recap">
+					<h4>What you sent</h4>
+					<dl>
+						<?php foreach ( $recap as $row ) : ?>
+							<dt><?php echo esc_html( $row[0] ); ?></dt>
+							<dd><?php echo esc_html( $row[1] ); ?></dd>
+						<?php endforeach; ?>
+					</dl>
+				</div>
+			<?php endif; ?>
+			<p class="aqm-note" style="margin-top:14px">If you need to send another message, please refresh this page.</p>
 		<?php elseif ( ! $fields ) : ?>
 			<div class="aqm-alert aqm-alert--error">
 				<span class="aqm-icon" aria-hidden="true">!</span>
 				<span>This form is not available at the moment. Please contact us by telephone or email.</span>
 			</div>
 		<?php else : ?>
+
+		<?php
+		// Sanitised with sanitize_textarea_field() on the way in, so it holds
+		// no markup. wpautop() on already-escaped text gives paragraphs
+		// without giving anyone a way in.
+		$intro = trim( (string) aqm_col( $form, 'form_intro' ) );
+		if ( '' !== $intro ) :
+			?>
+			<div class="aqm-intro"><?php echo wp_kses_post( wpautop( esc_html( $intro ) ) ); ?></div>
+		<?php endif; ?>
 
 		<form class="aqm-form" method="post" action="">
 			<?php wp_nonce_field( 'aqm_submit_form_' . $form_id, 'aqm_nonce_' . $form_id ); ?>
@@ -1136,7 +1418,7 @@ function aqm_render_form( $atts ) {
 			$pairs = array();
 			$i     = 0;
 			$count = count( $fields );
-			$wide  = array( 'textarea', 'checkbox', 'combobox' );
+			$wide  = array( 'textarea', 'checkbox', 'combobox', 'multiselect' );
 
 			while ( $i < $count ) {
 				$a = $fields[ $i ];
@@ -1163,15 +1445,58 @@ function aqm_render_form( $atts ) {
 				foreach ( $pair as $f ) :
 					$name     = 'aqm_f' . $form_id . '_' . $f->field_key;
 					$id       = 'aqmf' . $form_id . '_' . $f->field_key;
-					$value    = (string) ( $values[ $f->field_key ] ?? '' );
+					// A multiselect keeps an array here on the way back from a
+					// validation error. Casting it would warn and print "Array".
+					$raw_val  = $values[ $f->field_key ] ?? '';
+					$picked   = is_array( $raw_val ) ? array_map( 'strval', $raw_val ) : array();
+					$value    = is_array( $raw_val ) ? '' : (string) $raw_val;
 					$invalid  = isset( $errors[ $f->field_key ] );
 					$err_id   = $id . '_error';
-					$describe = $invalid ? ' aria-invalid="true" aria-describedby="' . esc_attr( $err_id ) . '"' : '';
+					$hint     = aqm_field_hint( $f );
+					$hint_id  = $id . '_hint';
+
+					// A screen reader has to hear the guidance as well as the
+					// error. 7.3.0 pointed aria-describedby at the error alone,
+					// so help text would have been announced to nobody.
+					$ids = array();
+					if ( '' !== $hint ) {
+						$ids[] = $hint_id;
+					}
+					if ( $invalid ) {
+						$ids[] = $err_id;
+					}
+					$describe  = $ids ? ' aria-describedby="' . esc_attr( implode( ' ', $ids ) ) . '"' : '';
+					$describe .= $invalid ? ' aria-invalid="true"' : '';
+
 					$required = $f->required ? ' required aria-required="true"' : '';
 					$auto     = aqm_autocomplete_for( $f );
+
+					// A default value belongs to a FRESH form. On the way back
+					// from a validation error $values holds what the visitor
+					// actually typed, and re-injecting a default there would
+					// silently undo their deletion.
+					$prefill = '';
+					if ( ! $mine ) {
+						$prefill = (string) aqm_col( $f, 'default_value' );
+						if ( 'number' === $f->field_type ) {
+							$prefill = (string) aqm_num_opt( $f, 'num_default', $prefill );
+						}
+					}
+					if ( '' === $value && '' !== $prefill && ! in_array( $f->field_type, array( 'select', 'checkbox', 'multiselect' ), true ) ) {
+						$value = $prefill;
+					}
+					?>
+					<?php
+					// A group of tick boxes has no single control to label, so
+					// "for" would point at an id that does not exist. Name the
+					// label instead and let the group reference it.
+					$is_group = ( 'multiselect' === $f->field_type );
 					?>
 					<div class="aqm-group<?php echo $invalid ? ' aqm-group--invalid' : ''; ?>">
-						<label for="<?php echo esc_attr( $id ); ?>">
+						<label <?php echo $is_group
+							? 'id="' . esc_attr( $id ) . '_label"'
+							: 'for="' . esc_attr( $id ) . '"'; // phpcs:ignore
+						?>>
 							<?php echo esc_html( $f->label ); ?>
 							<?php if ( $f->required ) : ?>
 								<span class="aqm-req" aria-hidden="true">*</span>
@@ -1182,7 +1507,7 @@ function aqm_render_form( $atts ) {
 
 						<?php if ( 'textarea' === $f->field_type ) : ?>
 							<textarea id="<?php echo esc_attr( $id ); ?>" name="<?php echo esc_attr( $name ); ?>"
-								rows="5" maxlength="5000"
+								rows="5" maxlength="5000" data-aqm-counter="5000"
 								placeholder="<?php echo esc_attr( $f->placeholder ); ?>"
 								<?php echo $required . $describe; // phpcs:ignore ?>><?php echo esc_textarea( $value ); ?></textarea>
 
@@ -1211,8 +1536,40 @@ function aqm_render_form( $atts ) {
 										<option value="<?php echo esc_attr( $opt->label ); ?>"></option>
 									<?php endforeach; ?>
 								</datalist>
-								<span class="aqm-combobox-hint">Choose from the list or type your own value</span>
 							</div>
+
+						<?php elseif ( 'multiselect' === $f->field_type ) : ?>
+							<?php $opts = aqm_get_options( $f->id ); ?>
+							<div class="aqm-multi" role="group"
+								aria-labelledby="<?php echo esc_attr( $id ); ?>_label"
+								<?php echo $describe; // phpcs:ignore ?>>
+								<?php foreach ( $opts as $oi => $opt ) : ?>
+									<label class="aqm-chk">
+										<input type="checkbox"
+											name="<?php echo esc_attr( $name ); ?>[]"
+											value="<?php echo esc_attr( $opt->label ); ?>"
+											<?php checked( true, in_array( $opt->label, $picked, true ) ); ?>>
+										<?php echo esc_html( $opt->label ); ?>
+									</label>
+								<?php endforeach; ?>
+							</div>
+							<?php
+							// Anything the visitor typed rather than ticked. It
+							// comes back in $picked as an entry matching no
+							// option, so it belongs in this box, not lost.
+							$known = array();
+							foreach ( $opts as $opt ) {
+								$known[] = $opt->label;
+							}
+							$typed = implode( ', ', array_diff( $picked, $known ) );
+							?>
+							<input type="text" class="aqm-multi-other"
+								id="<?php echo esc_attr( $id ); ?>"
+								name="<?php echo esc_attr( $name ); ?>_other"
+								maxlength="200" autocomplete="off"
+								value="<?php echo esc_attr( $typed ); ?>"
+								placeholder="<?php echo esc_attr( $f->placeholder ? $f->placeholder : 'Something else? Type it here' ); ?>"
+								aria-label="<?php echo esc_attr( $f->label ); ?> &mdash; anything not listed above">
 
 						<?php elseif ( 'checkbox' === $f->field_type ) : ?>
 							<label class="aqm-chk">
@@ -1239,9 +1596,6 @@ function aqm_render_form( $atts ) {
 								if ( '' !== $nmax ) {
 									$numattr .= ' max="' . esc_attr( $nmax ) . '"';
 								}
-								if ( '' === $value ) {
-									$value = (string) aqm_num_opt( $f, 'num_default', '' );
-								}
 							}
 							?>
 							<input type="<?php echo esc_attr( $f->field_type ); ?>"
@@ -1252,9 +1606,13 @@ function aqm_render_form( $atts ) {
 								value="<?php echo esc_attr( $value ); ?>"
 								<?php echo $auto ? 'autocomplete="' . esc_attr( $auto ) . '"' : ''; ?>
 								<?php echo $required . $describe; // phpcs:ignore ?>>
-							<?php if ( 'email' === $f->field_type && ! $invalid ) : ?>
+							<?php if ( 'email' === $f->field_type && ! $invalid && '' === $hint ) : ?>
 								<span class="aqm-hint">We will never share your email address.</span>
 							<?php endif; ?>
+						<?php endif; ?>
+
+						<?php if ( '' !== $hint ) : ?>
+							<span class="aqm-help" id="<?php echo esc_attr( $hint_id ); ?>"><?php echo esc_html( $hint ); ?></span>
 						<?php endif; ?>
 
 						<?php if ( $invalid ) : ?>
@@ -1296,6 +1654,31 @@ function aqm_render_form( $atts ) {
 		</form>
 		<?php endif; ?>
 	</div>
+
+	<script>
+	/* Character counter. Progressive enhancement only - maxlength already
+	   stops the typing; this explains WHY it stopped. */
+	(function () {
+		var wrap = document.getElementById('aqm-form-<?php echo (int) $form_id; ?>');
+		if (!wrap) { return; }
+		var boxes = wrap.querySelectorAll('textarea[data-aqm-counter]');
+		Array.prototype.forEach.call(boxes, function (box) {
+			var max = parseInt(box.getAttribute('data-aqm-counter'), 10) || 0;
+			if (!max) { return; }
+			var out = document.createElement('span');
+			out.className = 'aqm-counter';
+			out.setAttribute('aria-hidden', 'true');
+			box.parentNode.insertBefore(out, box.nextSibling);
+			function tick() {
+				var left = max - box.value.length;
+				out.textContent = left > 300 ? '' : left + ' characters left';
+				out.className = 'aqm-counter' + (left <= 0 ? ' aqm-counter--over' : '');
+			}
+			box.addEventListener('input', tick);
+			tick();
+		});
+	})();
+	</script>
 
 	<?php if ( $status ) : ?>
 	<script>
@@ -1360,27 +1743,73 @@ function aqm_mail_failure_notice() {
  * Admin notices travel as short codes in the URL after a redirect, never as
  * raw HTML, so nothing user-supplied is ever echoed unescaped.
  */
+/**
+ * Turn one pasted block into a list of option labels.
+ *
+ * Separators are the newline and the three characters nobody puts inside a
+ * label: the middot, the pipe and the semicolon. THE COMMA IS DELIBERATELY
+ * NOT ONE OF THEM - plenty of perfectly ordinary labels contain one ("Yes,
+ * with a guest"), and a splitter that guesses would destroy them silently.
+ * Anyone who wants comma-separated entry can press Enter instead.
+ *
+ * @param string $raw Pasted text.
+ * @return string[] Trimmed, de-duplicated, in the order given.
+ */
+function aqm_split_options( $raw ) {
+	$parts = preg_split( '/[\r\n\x{00B7}|;]+/u', (string) $raw );
+	if ( ! is_array( $parts ) ) {
+		return array();
+	}
+
+	$out  = array();
+	$seen = array();
+	foreach ( $parts as $part ) {
+		// A list pasted from a document often arrives with bullets or dashes
+		// still attached; strip those rather than storing "- Second choice".
+		$one = sanitize_text_field( $part );
+		$one = preg_replace( '/^[\s\x{2022}\x{00B7}\-\x{2013}\x{2014}]+|[\s\x{2022}\x{00B7}\-\x{2013}\x{2014}]+$/u', '', $one );
+		$one = trim( (string) $one );
+		if ( '' === $one ) {
+			continue;
+		}
+		if ( function_exists( 'mb_substr' ) ) {
+			$one = mb_substr( $one, 0, 120 );
+		} else {
+			$one = substr( $one, 0, 120 );
+		}
+		$key = strtolower( $one );
+		if ( isset( $seen[ $key ] ) ) {
+			continue;
+		}
+		$seen[ $key ] = true;
+		$out[]        = $one;
+	}
+	return $out;
+}
+
 function aqm_notice_text( $code ) {
 	$map = array(
-		'form_created'    => array( 'success', 'Form created with default fields.' ),
-		'form_deleted'    => array( 'success', 'Form deleted.' ),
-		'form_duplicated' => array( 'success', 'Form duplicated.' ),
-		'form_name_empty' => array( 'error', 'Please enter a form name.' ),
-		'settings_saved'  => array( 'success', 'Settings saved.' ),
-		'field_saved'     => array( 'success', 'Field saved.' ),
-		'field_deleted'   => array( 'success', 'Field deleted.' ),
-		'field_shown'     => array( 'success', 'Field is now visible on the form.' ),
-		'field_hidden'    => array( 'success', 'Field is now hidden from the form.' ),
-		'field_required'  => array( 'success', 'Field marked as required.' ),
-		'field_optional'  => array( 'success', 'Field marked as optional.' ),
-		'field_empty'     => array( 'error', 'The field label cannot be empty.' ),
-		'option_saved'    => array( 'success', 'Option saved.' ),
-		'option_deleted'  => array( 'success', 'Option deleted.' ),
-		'option_empty'    => array( 'error', 'The option label cannot be empty.' ),
-		'entries_deleted' => array( 'success', 'Selected submissions deleted.' ),
-		'ips_purged'      => array( 'success', 'Stored IP addresses cleared. No submissions were deleted.' ),
-		'delete_failed'   => array( 'error', 'The submissions could not be deleted - a database error was logged.' ),
-		'nothing_picked'  => array( 'error', 'Nothing was selected.' ),
+		'form_created'      => array( 'success', 'Form created with default fields.' ),
+		'form_deleted'      => array( 'success', 'Form deleted.' ),
+		'form_duplicated'   => array( 'success', 'Form duplicated.' ),
+		'form_name_empty'   => array( 'error', 'Please enter a form name.' ),
+		'settings_saved'    => array( 'success', 'Settings saved.' ),
+		'field_saved'       => array( 'success', 'Field saved.' ),
+		'field_deleted'     => array( 'success', 'Field deleted.' ),
+		'field_shown'       => array( 'success', 'Field is now visible on the form.' ),
+		'field_hidden'      => array( 'success', 'Field is now hidden from the form.' ),
+		'field_required'    => array( 'success', 'Field marked as required.' ),
+		'field_optional'    => array( 'success', 'Field marked as optional.' ),
+		'field_empty'       => array( 'error', 'The field label cannot be empty.' ),
+		'option_saved'      => array( 'success', 'Option saved.' ),
+		'option_deleted'    => array( 'success', 'Option deleted.' ),
+		'option_empty'      => array( 'error', 'The option label cannot be empty.' ),
+		'options_added'     => array( 'success', 'Options added.' ),
+		'options_duplicate' => array( 'error', 'Nothing was added - every one of those is already on the list.' ),
+		'entries_deleted'   => array( 'success', 'Selected submissions deleted.' ),
+		'ips_purged'        => array( 'success', 'Stored IP addresses cleared. No submissions were deleted.' ),
+		'delete_failed'     => array( 'error', 'The submissions could not be deleted - a database error was logged.' ),
+		'nothing_picked'    => array( 'error', 'Nothing was selected.' ),
 	);
 	return $map[ $code ] ?? null;
 }
@@ -1389,11 +1818,19 @@ function aqm_render_notice() {
 	if ( empty( $_GET['aqm_msg'] ) ) {
 		return;
 	}
-	$notice = aqm_notice_text( sanitize_key( wp_unslash( $_GET['aqm_msg'] ) ) );
+	$code   = sanitize_key( wp_unslash( $_GET['aqm_msg'] ) );
+	$notice = aqm_notice_text( $code );
 	if ( ! $notice ) {
 		return;
 	}
-	echo '<div class="notice notice-' . esc_attr( $notice[0] ) . ' is-dismissible"><p>' . esc_html( $notice[1] ) . '</p></div>';
+
+	$text = $notice[1];
+	if ( 'options_added' === $code ) {
+		$n    = max( 1, (int) ( $_GET['aqm_n'] ?? 1 ) );
+		$text = 1 === $n ? 'One option added.' : sprintf( '%d options added.', $n );
+	}
+
+	echo '<div class="notice notice-' . esc_attr( $notice[0] ) . ' is-dismissible"><p>' . esc_html( $text ) . '</p></div>';
 }
 
 add_action( 'admin_enqueue_scripts', 'aqm_admin_scripts' );
@@ -1449,6 +1886,49 @@ function aqm_admin_scripts( $hook ) {
 				}
 				$t.on("change",sync);$lab.on("input",sync);sync();
 			}
+
+			/* The type list on the right was decoration that looked like a
+			   control. Make it do the thing it looks like it does. */
+			var $pick=$(".aqm-type-pick");
+			if($t.length&&$pick.length){
+				function markType(){
+					var v=$t.val();
+					$pick.each(function(){$(this).toggleClass("is-on",$(this).attr("data-type")===v);});
+				}
+				$pick.on("click",function(){
+					$t.val($(this).attr("data-type")).trigger("change");
+					markType();
+					$t.trigger("focus");
+				});
+				$t.on("change",markType);
+				markType();
+			}
+
+			/* "Placeholder" means something different on a checkbox: it is the
+			   wording BESIDE the box, not a hint inside it. One label on two
+			   jobs is how the confusion starts, so relabel it. */
+			var $phL=$("#aqm_ph_label"),$phH=$("#aqm_ph_help"),
+			    $ph=$("#aqm_field_placeholder"),$def=$("#aqm-default-wrap");
+			if($t.length&&$phL.length){
+				function syncPh(){
+					var v=$t.val();
+					if(v==="checkbox"){
+						$phL.text("Text beside the tick box");
+						$phH.html("What the visitor reads next to the checkbox. Leave blank to reuse the label.");
+						$ph.attr("placeholder","e.g. Yes, add me to the mailing list");
+					}else{
+						$phL.text("Placeholder");
+						$phH.html("Grey example text inside the box. It vanishes as soon as they type and is <strong>never submitted</strong>. It is not a default value.");
+						$ph.attr("placeholder","e.g. nut allergy");
+					}
+					/* A default has no meaning where the visitor picks from a
+					   list or ticks a box, and Number keeps its own Default in
+					   the box above. Hide it rather than let it be set and
+					   silently ignored. */
+					$def.toggle(v!=="checkbox"&&v!=="select"&&v!=="multiselect"&&v!=="number");
+				}
+				$t.on("change",syncPh);syncPh();
+			}
 		});'
 	);
 
@@ -1468,6 +1948,10 @@ function aqm_admin_scripts( $hook ) {
 		.aqm-box{background:#fff;border:1px solid #ddd;border-radius:6px;padding:20px 24px;margin-bottom:20px}
 		.aqm-type-badge{background:#e8f0fe;color:#1a56db;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
 		.aqm-type-badge-combobox{background:#f0e8fe;color:#6b21d6;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+		.aqm-type-pick{display:flex;gap:8px;margin-bottom:5px;align-items:center;width:100%;text-align:left;background:#fff;border:1px solid #dcdcde;border-radius:4px;padding:5px 8px;cursor:pointer;font-size:12px;line-height:1.4}
+		.aqm-type-pick:hover{background:#f0f6fc;border-color:#0073aa}
+		.aqm-type-pick.is-on{border-color:#1a56db;background:#f5f8ff;box-shadow:0 0 0 2px rgba(26,86,219,.18)}
+		.aqm-type-pick:focus{outline:2px solid #1a56db;outline-offset:1px}
 		.aqm-save-status{font-size:12px;color:#3a8a4a;margin-left:12px;font-style:italic}
 		tr.aqm-disabled{opacity:.5}
 		.aqm-form-card{background:#fff;border:1px solid #ddd;border-radius:8px;padding:18px 22px;margin-bottom:16px;display:flex;align-items:flex-start;gap:16px}
@@ -1599,6 +2083,7 @@ function aqm_admin_forms_page() {
 					'notify_email'      => $src->notify_email,
 					'notify_cc'         => $src->notify_cc,
 					'email_subject'     => $src->email_subject,
+					'form_intro'        => aqm_col( $src, 'form_intro' ),
 					'captcha_enabled'   => $src->captcha_enabled,
 					'spam_protection'   => $src->spam_protection,
 					'autoreply_enabled' => $src->autoreply_enabled,
@@ -1608,28 +2093,37 @@ function aqm_admin_forms_page() {
 					'store_ip'          => $src->store_ip,
 					'created_at'        => current_time( 'mysql' ),
 				),
-				array( '%s', '%s', '%s', '%s', '%d', '%d', '%d', '%s', '%s', '%s', '%d', '%s' )
+				array( '%s', '%s', '%s', '%s', '%s', '%d', '%d', '%d', '%s', '%s', '%s', '%d', '%s' )
 			);
 			$new_id = (int) $wpdb->insert_id;
 
 			foreach ( aqm_get_fields( $src->id ) as $sf ) {
 				$wpdb->insert(
 					aqm_table( 'form_fields' ),
+					// 7.3.0 copied only the first eight columns, so duplicating a
+					// form quietly reset every number field's whole/min/max/default
+					// back to the defaults. Copy the whole field.
 					array(
-						'form_id'     => $new_id,
-						'field_key'   => $sf->field_key,
-						'label'       => $sf->label,
-						'field_type'  => $sf->field_type,
-						'placeholder' => $sf->placeholder,
-						'required'    => $sf->required,
-						'enabled'     => $sf->enabled,
-						'sort_order'  => $sf->sort_order,
+						'form_id'       => $new_id,
+						'field_key'     => $sf->field_key,
+						'label'         => $sf->label,
+						'field_type'    => $sf->field_type,
+						'placeholder'   => $sf->placeholder,
+						'help_text'     => aqm_col( $sf, 'help_text' ),
+						'default_value' => aqm_col( $sf, 'default_value' ),
+						'required'      => $sf->required,
+						'enabled'       => $sf->enabled,
+						'sort_order'    => $sf->sort_order,
+						'num_whole'     => (int) aqm_col( $sf, 'num_whole', 1 ),
+						'num_min'       => aqm_col( $sf, 'num_min' ),
+						'num_max'       => aqm_col( $sf, 'num_max' ),
+						'num_default'   => aqm_col( $sf, 'num_default' ),
 					),
-					array( '%d', '%s', '%s', '%s', '%s', '%d', '%d', '%d' )
+					array( '%d', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%d', '%d', '%d', '%s', '%s', '%s' )
 				);
 				$new_field_id = (int) $wpdb->insert_id;
 
-				if ( in_array( $sf->field_type, array( 'select', 'combobox' ), true ) ) {
+				if ( in_array( $sf->field_type, aqm_option_types(), true ) ) {
 					foreach ( aqm_get_options( $sf->id ) as $opt ) {
 						$wpdb->insert(
 							aqm_table( 'field_options' ),
@@ -1723,17 +2217,31 @@ function aqm_admin_forms_page() {
 
 function aqm_field_types() {
 	return array(
-		'text'     => 'Text',
-		'email'    => 'Email (validated)',
-		'tel'      => 'Telephone',
-		'number'   => 'Number',
-		'url'      => 'Website URL',
-		'date'     => 'Date Picker',
-		'select'   => 'Dropdown (pick only)',
-		'combobox' => 'Combobox (pick OR type freely)',
-		'textarea' => 'Text Area',
-		'checkbox' => 'Checkbox',
+		'text'        => 'Text',
+		'email'       => 'Email (validated)',
+		'tel'         => 'Telephone',
+		'number'      => 'Number',
+		'url'         => 'Website URL',
+		'date'        => 'Date Picker',
+		'select'      => 'Dropdown (pick only)',
+		'combobox'    => 'Combobox (pick OR type freely)',
+		'multiselect' => 'Checkboxes (pick several)',
+		'textarea'    => 'Text Area',
+		'checkbox'    => 'Checkbox',
 	);
+}
+
+/**
+ * Field types whose answers come from the options table.
+ *
+ * One list, so adding a type never means hunting for the six places that
+ * decide whether an Options button appears, whether options are copied on
+ * duplicate, and whether a submitted value is checked against them.
+ *
+ * @return string[]
+ */
+function aqm_option_types() {
+	return array( 'select', 'combobox', 'multiselect' );
 }
 
 function aqm_admin_builder_page() {
@@ -1782,6 +2290,7 @@ function aqm_admin_builder_page() {
 				'notify_email'      => is_email( $email ) ? $email : get_option( 'admin_email' ),
 				'notify_cc'         => implode( ', ', $cc ),
 				'email_subject'     => isset( $_POST['email_subject'] ) ? sanitize_text_field( wp_unslash( $_POST['email_subject'] ) ) : '',
+				'form_intro'        => isset( $_POST['form_intro'] ) ? sanitize_textarea_field( wp_unslash( $_POST['form_intro'] ) ) : '',
 				'success_message'   => isset( $_POST['success_message'] ) ? sanitize_text_field( wp_unslash( $_POST['success_message'] ) ) : '',
 				'autoreply_subject' => isset( $_POST['autoreply_subject'] ) ? sanitize_text_field( wp_unslash( $_POST['autoreply_subject'] ) ) : '',
 				'autoreply_body'    => isset( $_POST['autoreply_body'] ) ? sanitize_textarea_field( wp_unslash( $_POST['autoreply_body'] ) ) : '',
@@ -1791,7 +2300,7 @@ function aqm_admin_builder_page() {
 				'autoreply_enabled' => empty( $_POST['autoreply_enabled'] ) ? 0 : 1,
 			),
 			array( 'id' => $form_id ),
-			array( '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%d', '%d', '%d' ),
+			array( '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%d', '%d', '%d' ),
 			array( '%d' )
 		);
 
@@ -1840,6 +2349,8 @@ function aqm_admin_builder_page() {
 		$label = isset( $_POST['aqm_field_label'] ) ? sanitize_text_field( wp_unslash( $_POST['aqm_field_label'] ) ) : '';
 		$type  = isset( $_POST['aqm_field_type'] ) ? sanitize_key( wp_unslash( $_POST['aqm_field_type'] ) ) : 'text';
 		$ph    = isset( $_POST['aqm_field_placeholder'] ) ? sanitize_text_field( wp_unslash( $_POST['aqm_field_placeholder'] ) ) : '';
+		$help  = isset( $_POST['aqm_field_help'] ) ? sanitize_text_field( wp_unslash( $_POST['aqm_field_help'] ) ) : '';
+		$defv  = isset( $_POST['aqm_field_default'] ) ? sanitize_text_field( wp_unslash( $_POST['aqm_field_default'] ) ) : '';
 		$req   = empty( $_POST['aqm_field_required'] ) ? 0 : 1;
 		$edit  = (int) ( $_POST['aqm_edit_id'] ?? 0 );
 
@@ -1875,17 +2386,19 @@ function aqm_admin_builder_page() {
 			$wpdb->update(
 				$ftable,
 				array(
-					'label'       => $label,
-					'field_type'  => $type,
-					'placeholder' => $ph,
-					'required'    => $req,
-					'num_whole'   => $whole,
-					'num_min'     => $nmin,
-					'num_max'     => $nmax,
-					'num_default' => $ndef,
+					'label'         => $label,
+					'field_type'    => $type,
+					'placeholder'   => $ph,
+					'help_text'     => $help,
+					'default_value' => $defv,
+					'required'      => $req,
+					'num_whole'     => $whole,
+					'num_min'       => $nmin,
+					'num_max'       => $nmax,
+					'num_default'   => $ndef,
 				),
 				array( 'id' => $edit, 'form_id' => $form_id ),
-				array( '%s', '%s', '%s', '%d', '%d', '%s', '%s', '%s' ),
+				array( '%s', '%s', '%s', '%s', '%s', '%d', '%d', '%s', '%s', '%s' ),
 				array( '%d', '%d' )
 			);
 		} else {
@@ -1893,20 +2406,22 @@ function aqm_admin_builder_page() {
 			$wpdb->insert(
 				$ftable,
 				array(
-					'form_id'     => $form_id,
-					'field_key'   => aqm_unique_key( $label, $form_id ),
-					'label'       => $label,
-					'field_type'  => $type,
-					'placeholder' => $ph,
-					'required'    => $req,
-					'enabled'     => 1,
-					'sort_order'  => $max + 1,
-					'num_whole'   => $whole,
-					'num_min'     => $nmin,
-					'num_max'     => $nmax,
-					'num_default' => $ndef,
+					'form_id'       => $form_id,
+					'field_key'     => aqm_unique_key( $label, $form_id ),
+					'label'         => $label,
+					'field_type'    => $type,
+					'placeholder'   => $ph,
+					'help_text'     => $help,
+					'default_value' => $defv,
+					'required'      => $req,
+					'enabled'       => 1,
+					'sort_order'    => $max + 1,
+					'num_whole'     => $whole,
+					'num_min'       => $nmin,
+					'num_max'       => $nmax,
+					'num_default'   => $ndef,
 				),
-				array( '%d', '%s', '%s', '%s', '%s', '%d', '%d', '%d', '%d', '%s', '%s', '%s' )
+				array( '%d', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%d', '%d', '%d', '%s', '%s', '%s' )
 			);
 		}
 
@@ -1917,22 +2432,52 @@ function aqm_admin_builder_page() {
 	if ( isset( $_POST['aqm_option_nonce'] ) ) {
 		check_admin_referer( 'aqm_save_option_' . $form_id, 'aqm_option_nonce' );
 
-		$label = isset( $_POST['aqm_opt_label'] ) ? sanitize_text_field( wp_unslash( $_POST['aqm_opt_label'] ) ) : '';
-		$fld   = (int) ( $_POST['aqm_opt_field_id'] ?? 0 );
-		$oid   = (int) ( $_POST['aqm_opt_edit_id'] ?? 0 );
+		// sanitize_textarea_field(), not sanitize_text_field(): the latter
+		// flattens newlines, which are the separator that matters most here.
+		$raw = isset( $_POST['aqm_opt_label'] ) ? sanitize_textarea_field( wp_unslash( $_POST['aqm_opt_label'] ) ) : '';
+		$fld = (int) ( $_POST['aqm_opt_field_id'] ?? 0 );
+		$oid = (int) ( $_POST['aqm_opt_edit_id'] ?? 0 );
 
-		if ( '' === $label ) {
+		if ( '' === trim( $raw ) ) {
 			$redirect( 'option_empty', array( 'options_for' => $fld ) );
 		}
 
 		if ( $oid ) {
-			$wpdb->update( $otable, array( 'label' => $label ), array( 'id' => $oid ), array( '%s' ), array( '%d' ) );
-		} else {
-			$max = (int) $wpdb->get_var( $wpdb->prepare( "SELECT MAX(sort_order) FROM $otable WHERE field_id = %d", $fld ) ); // phpcs:ignore
-			$wpdb->insert( $otable, array( 'field_id' => $fld, 'label' => $label, 'sort_order' => $max + 1 ), array( '%d', '%s', '%d' ) );
+			// Editing one option edits exactly one option. Splitting here would
+			// turn a correction into a silent multiplication.
+			$wpdb->update( $otable, array( 'label' => sanitize_text_field( $raw ) ), array( 'id' => $oid ), array( '%s' ), array( '%d' ) );
+			$redirect( 'option_saved', array( 'options_for' => $fld ) );
 		}
 
-		$redirect( 'option_saved', array( 'options_for' => $fld ) );
+		$labels = aqm_split_options( $raw );
+		if ( ! $labels ) {
+			$redirect( 'option_empty', array( 'options_for' => $fld ) );
+		}
+
+		// Skip anything already on the list, so pasting a corrected list over
+		// a partial one tops it up instead of doubling it.
+		$existing = array();
+		foreach ( aqm_get_options( $fld ) as $have ) {
+			$existing[ strtolower( $have->label ) ] = true;
+		}
+
+		$max   = (int) $wpdb->get_var( $wpdb->prepare( "SELECT MAX(sort_order) FROM $otable WHERE field_id = %d", $fld ) ); // phpcs:ignore
+		$added = 0;
+		foreach ( $labels as $one ) {
+			if ( isset( $existing[ strtolower( $one ) ] ) ) {
+				continue;
+			}
+			$existing[ strtolower( $one ) ] = true;
+			$max++;
+			$added++;
+			$wpdb->insert( $otable, array( 'field_id' => $fld, 'label' => $one, 'sort_order' => $max ), array( '%d', '%s', '%d' ) );
+		}
+
+		if ( ! $added ) {
+			$redirect( 'options_duplicate', array( 'options_for' => $fld ) );
+		}
+
+		$redirect( 'options_added', array( 'options_for' => $fld, 'aqm_n' => $added ) );
 	}
 
 	/* ---- View state ---- */
@@ -2001,10 +2546,17 @@ function aqm_admin_builder_page() {
 									<td><input type="text" id="fs_subject" name="email_subject" value="<?php echo esc_attr( $form->email_subject ); ?>" maxlength="200" style="width:100%"></td>
 								</tr>
 								<tr>
+									<th><label for="fs_intro">Introduction</label></th>
+									<td>
+										<textarea id="fs_intro" name="form_intro" rows="3" maxlength="1200" style="width:100%"><?php echo esc_textarea( aqm_col( $form, 'form_intro' ) ); ?></textarea>
+										<p class="description">Shown above the fields. Put what a person needs before they start &mdash; date, place, price, deadline. Blank lines make paragraphs. Leave empty for no introduction.</p>
+									</td>
+								</tr>
+								<tr>
 									<th><label for="fs_success">Thank-you message</label></th>
 									<td>
 										<input type="text" id="fs_success" name="success_message" value="<?php echo esc_attr( $form->success_message ); ?>" maxlength="255" style="width:100%">
-										<p class="description">Shown after a successful submission. <code>{name}</code> and <code>{comma_name}</code> are available.</p>
+										<p class="description">Shown after a successful submission. <code>{name}</code> and <code>{comma_name}</code> are available. What they filled in is listed underneath it automatically.</p>
 									</td>
 								</tr>
 								<tr>
@@ -2065,6 +2617,15 @@ function aqm_admin_builder_page() {
 								<td>
 									<strong><?php echo esc_html( $f->label ); ?></strong><br>
 									<code style="font-size:11px;color:#767676"><?php echo esc_html( $f->field_key ); ?></code>
+									<?php
+									// Show what the visitor actually reads, so the whole
+									// form's wording can be reviewed without opening
+									// nine field editors one at a time.
+									$row_hint = aqm_field_hint( $f );
+									if ( '' !== $row_hint ) :
+										?>
+										<span style="display:block;margin-top:3px;font-size:12px;color:#5f6b64;max-width:46ch">&#8627; <?php echo esc_html( $row_hint ); ?></span>
+									<?php endif; ?>
 								</td>
 								<td>
 									<span class="<?php echo 'combobox' === $f->field_type ? 'aqm-type-badge-combobox' : 'aqm-type-badge'; ?>"><?php echo esc_html( $f->field_type ); ?></span>
@@ -2078,7 +2639,7 @@ function aqm_admin_builder_page() {
 								<td>
 									<div class="aqm-tbl-actions">
 										<a href="<?php echo esc_url( $eu ); ?>" class="button button-small">Edit</a>
-										<?php if ( in_array( $f->field_type, array( 'select', 'combobox' ), true ) ) : ?>
+										<?php if ( in_array( $f->field_type, aqm_option_types(), true ) ) : ?>
 											<a href="<?php echo esc_url( $ou ); ?>" class="button button-small" style="color:#0073aa;border-color:#0073aa">Options</a>
 										<?php endif; ?>
 										<a href="<?php echo esc_url( $du ); ?>" class="button button-small" style="color:#b32d2e;border-color:#b32d2e"
@@ -2099,14 +2660,33 @@ function aqm_admin_builder_page() {
 						?>
 						<div class="aqm-box" style="border-color:#0073aa">
 							<h2 style="margin-top:0;font-size:14px;color:#0073aa;text-transform:uppercase;letter-spacing:.5px">
-								<?php echo 'combobox' === $opt_field->field_type ? 'Combobox Suggestions' : 'Dropdown Options'; ?>
+								<?php
+								$panel_titles = array(
+									'combobox'    => 'Combobox Suggestions',
+									'multiselect' => 'Tick-box Options',
+									'select'      => 'Dropdown Options',
+								);
+								echo esc_html( $panel_titles[ $opt_field->field_type ] ?? 'Options' );
+								?>
 								&mdash; <em><?php echo esc_html( $opt_field->label ); ?></em>
 								<span class="aqm-save-status" id="aqm-opt-order-status"></span>
 							</h2>
 
 							<?php if ( 'combobox' === $opt_field->field_type ) : ?>
 								<div style="background:#f0e8fe;border:1px solid #c4a8f5;border-radius:4px;padding:8px 14px;margin-bottom:14px;font-size:13px;color:#4a1990">
-									<strong>Combobox mode:</strong> these appear as suggestions. Visitors can pick one <em>or</em> type their own value.
+									<strong>Combobox mode:</strong> these are suggestions, not a closed list. The field opens
+									<strong>empty</strong> &mdash; nothing here is filled in or submitted unless the visitor picks it
+									or types something of their own. Leaving it blank is allowed on an optional field.
+								</div>
+							<?php elseif ( 'multiselect' === $opt_field->field_type ) : ?>
+								<div style="background:#eaf5ec;border:1px solid #b5debb;border-radius:4px;padding:8px 14px;margin-bottom:14px;font-size:13px;color:#1e5c29">
+									<strong>Tick-box mode:</strong> every one of these becomes a checkbox and the visitor can tick
+									<strong>as many as apply</strong>. A free-text box appears underneath for anything not on the list,
+									so the list does not have to be exhaustive.
+								</div>
+							<?php else : ?>
+								<div style="background:#e8f0fe;border:1px solid #b8d0f5;border-radius:4px;padding:8px 14px;margin-bottom:14px;font-size:13px;color:#12376b">
+									<strong>Dropdown mode:</strong> the visitor must pick one of these. They cannot type anything else.
 								</div>
 							<?php endif; ?>
 
@@ -2127,20 +2707,32 @@ function aqm_admin_builder_page() {
 							</ul>
 
 							<div style="margin-top:14px;padding-top:14px;border-top:1px solid #dde">
-								<strong><?php echo $editing_opt ? 'Edit Option' : 'Add Option'; ?></strong>
-								<form method="post" style="display:flex;gap:10px;align-items:center;margin-top:8px;flex-wrap:wrap">
+								<strong><?php echo $editing_opt ? 'Edit Option' : 'Add Options'; ?></strong>
+								<form method="post" style="display:flex;gap:10px;align-items:flex-start;margin-top:8px;flex-wrap:wrap">
 									<?php wp_nonce_field( 'aqm_save_option_' . $form_id, 'aqm_option_nonce' ); ?>
 									<input type="hidden" name="aqm_opt_field_id" value="<?php echo esc_attr( $show_opts_for ); ?>">
 									<?php if ( $editing_opt ) : ?>
 										<input type="hidden" name="aqm_opt_edit_id" value="<?php echo esc_attr( $editing_opt->id ); ?>">
 									<?php endif; ?>
 									<label class="screen-reader-text" for="aqm_opt_label">Option label</label>
-									<input type="text" id="aqm_opt_label" name="aqm_opt_label" maxlength="120"
-										value="<?php echo esc_attr( $editing_opt ? $editing_opt->label : '' ); ?>"
-										placeholder="Option label..." style="flex:1;min-width:180px" required>
-									<?php submit_button( $editing_opt ? 'Update' : 'Add Option', 'primary', 'submit', false ); ?>
 									<?php if ( $editing_opt ) : ?>
+										<input type="text" id="aqm_opt_label" name="aqm_opt_label" maxlength="120"
+											value="<?php echo esc_attr( $editing_opt->label ); ?>"
+											placeholder="Option label..." style="flex:1;min-width:180px" required>
+										<?php submit_button( 'Update', 'primary', 'submit', false ); ?>
 										<a href="<?php echo esc_url( add_query_arg( 'options_for', $show_opts_for, $base ) ); ?>" class="button">Cancel</a>
+									<?php else : ?>
+										<span style="flex:1;min-width:280px">
+											<textarea id="aqm_opt_label" name="aqm_opt_label" rows="4" style="width:100%"
+												placeholder="First choice&#10;Second choice&#10;Third choice" required></textarea>
+											<span class="description" style="display:block;margin-top:4px">
+												<strong>One per line</strong>, and you can add several at once. A middot <code>&middot;</code>,
+												a pipe <code>|</code> or a semicolon <code>;</code> also separate them.
+												<strong>Commas do not</strong>, so a label such as &ldquo;Yes, with a guest&rdquo; stays whole.
+												Bullets and leading dashes are stripped, and anything already on the list is skipped.
+											</span>
+										</span>
+										<?php submit_button( 'Add Options', 'primary', 'submit', false ); ?>
 									<?php endif; ?>
 								</form>
 							</div>
@@ -2180,10 +2772,25 @@ function aqm_admin_builder_page() {
 							</select>
 						</p>
 						<p>
-							<label for="aqm_field_placeholder"><strong>Placeholder</strong></label>
+							<label for="aqm_field_help"><strong>Help text</strong></label>
+							<input type="text" id="aqm_field_help" name="aqm_field_help" maxlength="300"
+								value="<?php echo esc_attr( $editing_field ? aqm_col( $editing_field, 'help_text' ) : '' ); ?>"
+								placeholder="Why you are asking, or what to put" style="width:100%;margin-top:4px">
+							<span class="description" style="display:block;margin-top:3px">A grey line under the field. This is where an explanation belongs &mdash; not in the label.</span>
+						</p>
+						<p>
+							<label for="aqm_field_placeholder"><strong id="aqm_ph_label">Placeholder</strong></label>
 							<input type="text" id="aqm_field_placeholder" name="aqm_field_placeholder" maxlength="200"
 								value="<?php echo esc_attr( $editing_field ? $editing_field->placeholder : '' ); ?>"
-								placeholder="Hint text..." style="width:100%;margin-top:4px">
+								placeholder="e.g. nut allergy" style="width:100%;margin-top:4px">
+							<span class="description" style="display:block;margin-top:3px" id="aqm_ph_help">Grey example text inside the box. It disappears as soon as they type and is <strong>never submitted</strong>. Not a default value.</span>
+						</p>
+						<p id="aqm-default-wrap">
+							<label for="aqm_field_default"><strong>Default value</strong></label>
+							<input type="text" id="aqm_field_default" name="aqm_field_default" maxlength="200"
+								value="<?php echo esc_attr( $editing_field ? aqm_col( $editing_field, 'default_value' ) : '' ); ?>"
+								placeholder="Leave blank for none" style="width:100%;margin-top:4px">
+							<span class="description" style="display:block;margin-top:3px">Real text, already in the box when the form opens. If they leave it alone, <strong>this is what gets submitted</strong>.</span>
 						</p>
 						<p>
 							<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:600">
@@ -2236,11 +2843,12 @@ function aqm_admin_builder_page() {
 				</div>
 
 				<div class="aqm-box" style="font-size:12px;background:#fafafa">
+					<p style="margin:0 0 10px;color:#555"><strong>Field types</strong> &mdash; click one to set it above.</p>
 					<?php foreach ( aqm_field_types() as $type => $label ) : ?>
-						<div style="display:flex;gap:8px;margin-bottom:5px;align-items:center">
+						<button type="button" class="aqm-type-pick" data-type="<?php echo esc_attr( $type ); ?>">
 							<span class="aqm-type-badge" style="min-width:60px;text-align:center"><?php echo esc_html( $type ); ?></span>
 							<span style="color:#555"><?php echo esc_html( $label ); ?></span>
-						</div>
+						</button>
 					<?php endforeach; ?>
 				</div>
 			</div>
