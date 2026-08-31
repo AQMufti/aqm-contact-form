@@ -3,7 +3,7 @@
  * Plugin Name:       A. Q. Mufti - Contact Form
  * Plugin URI:        https://github.com/AQMufti/aqm-contact-form
  * Description:       Multi-form builder. Each form has independent fields, dropdowns, editable comboboxes, multi-pick checkbox groups, per-field help text, default values, CAPTCHA, spam protection and required/optional settings. Shortcode: [aqm_form id="N"]
- * Version:           7.5.0
+ * Version:           7.6.0
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            A. Q. Mufti
@@ -16,7 +16,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'AQM_VERSION', '7.5.0' );
+define( 'AQM_VERSION', '7.6.0' );
 define( 'AQM_DB_VERSION', 11 );
 define( 'AQM_FILE', __FILE__ );
 
@@ -1052,6 +1052,91 @@ function aqm_value_is_blank( $val ) {
 	return '' === trim( (string) $val );
 }
 
+/* ── Consent links ──────────────────────────────────────────────────────────
+   Consent wording nearly always has to point somewhere: at a privacy policy,
+   and at how to stop hearing from you. Hard-coding either would tie this
+   plugin to one site, so both are tokens the author writes into ordinary
+   text, resolved at render time.
+
+     {privacy_policy}  the site's WordPress privacy policy page
+     {optout}          the opt-out page set under AQM Contact -> Settings
+
+   The privacy policy deliberately comes from WordPress core rather than a
+   field of our own. Every WordPress site already has that setting under
+   Settings -> Privacy, core can generate a starter policy, and other plugins
+   read the same value - so there is nothing here to keep in sync.
+
+   Both tokens degrade to plain words when nothing is configured, so a form
+   never shows a broken link or an empty href.
+
+   SECURITY: the author's text is escaped FIRST, then the tokens - which
+   survive escaping unchanged - are swapped for markup. That way an admin can
+   produce exactly these two links and no other HTML.
+*/
+
+function aqm_privacy_url() {
+	return function_exists( 'get_privacy_policy_url' ) ? (string) get_privacy_policy_url() : '';
+}
+
+function aqm_optout_url() {
+	return (string) get_option( 'aqm_optout_url', '' );
+}
+
+function aqm_consent_tokens() {
+	return array(
+		'{privacy_policy}' => array( aqm_privacy_url(), 'Privacy Policy' ),
+		'{optout}'         => array( aqm_optout_url(), 'opt out' ),
+	);
+}
+
+/**
+ * Escape author text, then resolve the consent tokens.
+ *
+ * @param string $text  Author-written text.
+ * @param bool   $plain True for email bodies, which are text/plain - a URL in
+ *                      brackets is readable there; an anchor tag is not.
+ * @return string
+ */
+function aqm_linkify( $text, $plain = false ) {
+	$out = $plain ? (string) $text : esc_html( (string) $text );
+
+	foreach ( aqm_consent_tokens() as $token => $pair ) {
+		list( $url, $label ) = $pair;
+
+		if ( $plain ) {
+			$replacement = $url ? $label . ' (' . $url . ')' : $label;
+		} elseif ( '' !== $url ) {
+			$replacement = '<a href="' . esc_url( $url ) . '" target="_blank" rel="noopener">'
+				. esc_html( $label ) . '</a>';
+		} else {
+			$replacement = esc_html( $label );
+		}
+
+		$out = str_replace( $token, $replacement, $out );
+	}
+
+	return $out;
+}
+
+/**
+ * Does this text promise a privacy policy the site does not publish?
+ *
+ * A real case: a live contact form asked people to agree to a "Privacy
+ * Policy" while every privacy URL on the site returned 404. Nobody noticed
+ * because nothing checks. This does.
+ */
+function aqm_promises_missing_privacy( $text ) {
+	$text = (string) $text;
+	if ( '' === trim( $text ) ) {
+		return false;
+	}
+	$mentions = ( false !== stripos( $text, 'privacy policy' ) )
+		|| ( false !== strpos( $text, '{privacy_policy}' ) );
+
+	return $mentions && '' === aqm_privacy_url();
+}
+
+
 function aqm_field_hint( $f ) {
 	$parts = array();
 	$help  = trim( (string) aqm_col( $f, 'help_text' ) );
@@ -1197,7 +1282,7 @@ function aqm_send_autoreply( $form, $fields, array $data ) {
 	wp_mail(
 		$to,
 		strtr( $form->autoreply_subject ? $form->autoreply_subject : 'We received your message', $vars ),
-		strtr( $form->autoreply_body ? $form->autoreply_body : aqm_default_autoreply_body(), $vars ),
+		aqm_linkify( strtr( $form->autoreply_body ? $form->autoreply_body : aqm_default_autoreply_body(), $vars ), true ),
 		$headers
 	);
 }
@@ -1398,7 +1483,7 @@ function aqm_render_form( $atts ) {
 		$intro = trim( (string) aqm_col( $form, 'form_intro' ) );
 		if ( '' !== $intro ) :
 			?>
-			<div class="aqm-intro"><?php echo wp_kses_post( wpautop( esc_html( $intro ) ) ); ?></div>
+			<div class="aqm-intro"><?php echo wp_kses_post( wpautop( aqm_linkify( $intro ) ) ); ?></div>
 		<?php endif; ?>
 
 		<form class="aqm-form" method="post" action="">
@@ -1576,7 +1661,7 @@ function aqm_render_form( $atts ) {
 								<input type="checkbox" name="<?php echo esc_attr( $name ); ?>" value="Yes"
 									<?php checked( 'Yes', $value ); ?>
 									<?php echo $required . $describe; // phpcs:ignore ?>>
-								<?php echo esc_html( $f->placeholder ? $f->placeholder : $f->label ); ?>
+								<?php echo wp_kses_post( aqm_linkify( $f->placeholder ? $f->placeholder : $f->label ) ); ?>
 							</label>
 
 						<?php else : ?>
@@ -1612,7 +1697,7 @@ function aqm_render_form( $atts ) {
 						<?php endif; ?>
 
 						<?php if ( '' !== $hint ) : ?>
-							<span class="aqm-help" id="<?php echo esc_attr( $hint_id ); ?>"><?php echo esc_html( $hint ); ?></span>
+							<span class="aqm-help" id="<?php echo esc_attr( $hint_id ); ?>"><?php echo wp_kses_post( aqm_linkify( $hint ) ); ?></span>
 						<?php endif; ?>
 
 						<?php if ( $invalid ) : ?>
@@ -2622,6 +2707,14 @@ function aqm_admin_builder_page() {
 									// form's wording can be reviewed without opening
 									// nine field editors one at a time.
 									$row_hint = aqm_field_hint( $f );
+									if ( aqm_promises_missing_privacy( $row_hint . ' ' . aqm_col( $f, 'placeholder' ) ) ) :
+										?>
+										<span style="display:block;margin-top:3px;font-size:12px;color:#8a1f11;max-width:52ch">
+											&#9888; This mentions a privacy policy, but none is published.
+											<a href="<?php echo esc_url( admin_url( 'options-privacy.php' ) ); ?>">Set one under Settings &rarr; Privacy</a>.
+										</span>
+										<?php
+									endif;
 									if ( '' !== $row_hint ) :
 										?>
 										<span style="display:block;margin-top:3px;font-size:12px;color:#5f6b64;max-width:46ch">&#8627; <?php echo esc_html( $row_hint ); ?></span>
@@ -3267,6 +3360,7 @@ function aqm_admin_settings_page() {
 		update_option( 'aqm_proxy_header', array_key_exists( $proxy, aqm_proxy_headers() ) ? $proxy : '' );
 		update_option( 'aqm_rate_limit', max( 0, min( 100, (int) ( $_POST['rate_limit'] ?? 5 ) ) ) );
 		update_option( 'aqm_delete_on_uninstall', empty( $_POST['delete_on_uninstall'] ) ? 0 : 1 );
+		update_option( 'aqm_optout_url', esc_url_raw( wp_unslash( $_POST['optout_url'] ?? '' ) ) );
 
 		wp_safe_redirect( add_query_arg( 'aqm_msg', 'settings_saved', admin_url( 'admin.php?page=aqm-settings' ) ) );
 		exit;
@@ -3275,6 +3369,8 @@ function aqm_admin_settings_page() {
 	$proxy_header = (string) get_option( 'aqm_proxy_header', '' );
 	$rate_limit   = (int) get_option( 'aqm_rate_limit', 5 );
 	$delete_all   = (int) get_option( 'aqm_delete_on_uninstall', 0 );
+	$optout_url   = aqm_optout_url();
+	$privacy_url  = aqm_privacy_url();
 	$detected_ip  = aqm_get_client_ip();
 	?>
 	<div class="wrap">
@@ -3308,6 +3404,39 @@ function aqm_admin_settings_page() {
 							<br><strong>Detected right now:</strong> <code><?php echo esc_html( $detected_ip ? $detected_ip : 'unknown' ); ?></code>
 							&mdash; if that is not your own IP address, choose a different option above.
 						</p>
+					</td>
+				</tr>
+			</table>
+
+			<h2>Consent &amp; Privacy</h2>
+			<table class="form-table" role="presentation">
+				<tr>
+					<th scope="row">Privacy policy</th>
+					<td>
+						<?php if ( '' !== $privacy_url ) : ?>
+							<p><strong>Published:</strong>
+								<a href="<?php echo esc_url( $privacy_url ); ?>" target="_blank" rel="noopener"><?php echo esc_html( $privacy_url ); ?></a>
+							</p>
+						<?php else : ?>
+							<p><strong>Not set.</strong> Any form text promising a privacy policy is promising something this site does not publish.</p>
+							<p><a href="<?php echo esc_url( admin_url( 'options-privacy.php' ) ); ?>">Set or create one under Settings &rarr; Privacy</a> - WordPress can generate a starter policy for you.</p>
+						<?php endif; ?>
+						<p class="description">Taken from WordPress&#8217;s own setting, so it stays in step with the rest of the site.</p>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="optout_url">Opt-out page</label></th>
+					<td>
+						<input type="url" id="optout_url" name="optout_url" value="<?php echo esc_attr( $optout_url ); ?>" placeholder="https://example.com/unsubscribe" class="regular-text">
+						<p class="description">Where someone goes to stop hearing from you. Optional.</p>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row">Using them</th>
+					<td>
+						<p>Write either token into a field&#8217;s help text, the words beside a tick box, a form introduction, or an auto-reply. It becomes a link when the page exists, and plain words when it does not:</p>
+						<p><code>{privacy_policy}</code> &nbsp; <code>{optout}</code></p>
+						<p class="description">Example: <em>&#8220;&hellip;you agree to our {privacy_policy} and may {optout} at any time.&#8221;</em></p>
 					</td>
 				</tr>
 			</table>
@@ -3557,4 +3686,5 @@ function aqm_uninstall() {
 	delete_option( 'aqm_proxy_header' );
 	delete_option( 'aqm_rate_limit' );
 	delete_option( 'aqm_delete_on_uninstall' );
+	delete_option( 'aqm_optout_url' );
 }
