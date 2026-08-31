@@ -3,7 +3,7 @@
  * Plugin Name:       A. Q. Mufti - Contact Form
  * Plugin URI:        https://github.com/AQMufti/aqm-contact-form
  * Description:       Multi-form builder. Each form has independent fields, dropdowns, editable comboboxes, multi-pick checkbox groups, per-field help text, default values, CAPTCHA, spam protection and required/optional settings. Shortcode: [aqm_form id="N"]
- * Version:           7.4.0
+ * Version:           7.5.0
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            A. Q. Mufti
@@ -16,8 +16,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'AQM_VERSION', '7.4.0' );
-define( 'AQM_DB_VERSION', 10 );
+define( 'AQM_VERSION', '7.5.0' );
+define( 'AQM_DB_VERSION', 11 );
 define( 'AQM_FILE', __FILE__ );
 
 if ( ! defined( 'AQM_GITHUB_REPO' ) ) {
@@ -72,11 +72,11 @@ function aqm_install() {
 			form_intro text NOT NULL,
 			captcha_enabled tinyint(1) NOT NULL default 1,
 			spam_protection tinyint(1) NOT NULL default 1,
-			autoreply_enabled tinyint(1) NOT NULL default 0,
+			autoreply_enabled tinyint(1) NOT NULL default 1,
 			autoreply_subject varchar(200) NOT NULL default 'We received your message',
 			autoreply_body text NOT NULL,
 			success_message varchar(255) NOT NULL default '',
-			store_ip tinyint(1) NOT NULL default 1,
+			store_ip tinyint(1) NOT NULL default 0,
 			created_at datetime NOT NULL,
 			PRIMARY KEY  (id)
 		) $charset;"
@@ -89,8 +89,8 @@ function aqm_install() {
 			field_key varchar(80) NOT NULL,
 			label varchar(120) NOT NULL,
 			field_type varchar(30) NOT NULL default 'text',
-			placeholder varchar(200) NOT NULL default '',
-			help_text varchar(300) NOT NULL default '',
+			placeholder text NOT NULL,
+			help_text text NOT NULL,
 			default_value varchar(200) NOT NULL default '',
 			required tinyint(1) NOT NULL default 1,
 			enabled tinyint(1) NOT NULL default 1,
@@ -154,16 +154,16 @@ function aqm_seed_default_form( $form_name = 'General Contact Form' ) {
 		aqm_table( 'forms' ),
 		array(
 			'form_name'         => $form_name,
-			'notify_email'      => get_option( 'admin_email' ),
+			'notify_email'      => '',
 			'email_subject'     => 'New Contact Form Submission',
 			'form_intro'        => '',
 			'captcha_enabled'   => 1,
 			'spam_protection'   => 1,
-			'autoreply_enabled' => 0,
+			'autoreply_enabled' => 1,
 			'autoreply_subject' => 'We received your message',
 			'autoreply_body'    => aqm_default_autoreply_body(),
 			'success_message'   => 'Thank you{comma_name}! Your message has been received. We will be in touch soon.',
-			'store_ip'          => 1,
+			'store_ip'          => 0,
 			'created_at'        => current_time( 'mysql' ),
 		),
 		array( '%s', '%s', '%s', '%s', '%d', '%d', '%d', '%s', '%s', '%s', '%d', '%s' )
@@ -2287,7 +2287,7 @@ function aqm_admin_builder_page() {
 			aqm_table( 'forms' ),
 			array(
 				'form_name'         => isset( $_POST['form_name'] ) ? sanitize_text_field( wp_unslash( $_POST['form_name'] ) ) : $form->form_name,
-				'notify_email'      => is_email( $email ) ? $email : get_option( 'admin_email' ),
+				'notify_email'      => is_email( $email ) ? $email : '',
 				'notify_cc'         => implode( ', ', $cc ),
 				'email_subject'     => isset( $_POST['email_subject'] ) ? sanitize_text_field( wp_unslash( $_POST['email_subject'] ) ) : '',
 				'form_intro'        => isset( $_POST['form_intro'] ) ? sanitize_textarea_field( wp_unslash( $_POST['form_intro'] ) ) : '',
@@ -2530,8 +2530,8 @@ function aqm_admin_builder_page() {
 								<tr>
 									<th><label for="fs_email">Notification Email</label></th>
 									<td>
-										<input type="email" id="fs_email" name="notify_email" value="<?php echo esc_attr( $form->notify_email ); ?>" style="width:100%">
-										<p class="description">Submissions for this form are sent here.</p>
+										<input type="email" id="fs_email" name="notify_email" value="<?php echo esc_attr( $form->notify_email ); ?>" placeholder="info@youremail.com" style="width:100%">
+										<p class="description">Submissions for this form are sent here. <strong>Leave this blank and they go to the site administrator instead</strong> - always set it deliberately.</p>
 									</td>
 								</tr>
 								<tr>
