@@ -3,7 +3,7 @@
  * Plugin Name:       A. Q. Mufti - Contact Form
  * Plugin URI:        https://github.com/AQMufti/aqm-contact-form
  * Description:       Multi-form builder. Each form has independent fields, dropdowns, editable comboboxes, multi-pick checkbox groups, per-field help text, default values, CAPTCHA, spam protection and required/optional settings. Shortcode: [aqm_form id="N"]
- * Version:           7.7.0
+ * Version:           7.8.0
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            A. Q. Mufti
@@ -16,7 +16,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'AQM_VERSION', '7.7.0' );
+define( 'AQM_VERSION', '7.8.0' );
 define( 'AQM_DB_VERSION', 11 );
 define( 'AQM_FILE', __FILE__ );
 
@@ -3538,7 +3538,738 @@ function aqm_admin_settings_page() {
 }
 
 /* ══════════════════════════════════════════════════════════════
-   13. SELF-UPDATE FROM GITHUB RELEASES
+   13. REST API - form import and export                (7.8.0)
+
+   Everything in the form builder runs through admin-post handlers
+   guarded by nonces, which means a form can only ever be built by a
+   human clicking. That is fine for one form. It is not fine for four
+   forms of thirteen fields whose labels must match each other
+   character for character, because that is precisely the thing a
+   person typing does not do reliably - and the CSV export unions
+   columns by field_key, so one drifted label becomes a second column
+   that never merges back.
+
+   These routes let a form live as a JSON file: version controlled,
+   diffable, reviewable, and reproducible on another site.
+
+   WHAT PROTECTS YOU HERE
+
+     - manage_options on every route. Nothing here is public.
+     - dry_run returns the full plan and writes nothing.
+     - Nothing is ever deleted unless you ask. prune=false (default)
+       means a field in the database but absent from the JSON is
+       reported and LEFT ALONE.
+     - Even with prune=true, a field is not deleted from a form that
+       already holds submissions unless force=true as well. Deleting a
+       field orphans that answer in every stored entry, and the entry
+       keeps the data with no column left to show it under.
+     - The whole import runs in a transaction where the storage engine
+       supports one, so a failure halfway does not leave half a form.
+
+   IDENTIFYING A FORM
+
+   By "id" if you pass one, otherwise by exact form_name, otherwise it
+   is created. Form IDs are not stable or predictable - AQ's install
+   starts at 2 because the seeded form was deleted - so name matching
+   is the reliable route and the response always reports the id it
+   used, which is the number the [aqm_form id="N"] shortcode needs.
+   ══════════════════════════════════════════════════════════════ */
+
+add_action( 'rest_api_init', 'aqm_rest_routes' );
+
+function aqm_rest_routes() {
+	register_rest_route(
+		'aqm/v1',
+		'/forms',
+		array(
+			array(
+				'methods'             => 'GET',
+				'callback'            => 'aqm_rest_list_forms',
+				'permission_callback' => 'aqm_rest_may_manage',
+			),
+			array(
+				'methods'             => 'POST',
+				'callback'            => 'aqm_rest_import_form',
+				'permission_callback' => 'aqm_rest_may_manage',
+			),
+		)
+	);
+
+	register_rest_route(
+		'aqm/v1',
+		'/forms/(?P<id>\d+)',
+		array(
+			array(
+				'methods'             => 'GET',
+				'callback'            => 'aqm_rest_export_form',
+				'permission_callback' => 'aqm_rest_may_manage',
+			),
+		)
+	);
+}
+
+function aqm_rest_may_manage() {
+	if ( current_user_can( 'manage_options' ) ) {
+		return true;
+	}
+	return new WP_Error(
+		'aqm_forbidden',
+		'Importing and exporting forms needs the manage_options capability.',
+		array( 'status' => rest_authorization_required_code() )
+	);
+}
+
+/**
+ * Column limits, so an over-long value is REJECTED rather than silently
+ * truncated by MySQL.
+ *
+ * 7.5.0 exists because consent text was being cut off at a varchar
+ * boundary with no error - the form looked saved and the sentence people
+ * were agreeing to had lost its second half. Never again by accident.
+ */
+function aqm_rest_limits() {
+	return array(
+		'form_name'         => 120,
+		'notify_email'      => 120,
+		'notify_cc'         => 255,
+		'email_subject'     => 200,
+		'autoreply_subject' => 200,
+		'success_message'   => 255,
+		'field_label'       => 120,
+		'field_key'         => 80,
+		'field_default'     => 200,
+		'option_label'      => 120,
+		// TEXT columns. Capped only to keep a runaway payload out of the DB.
+		'form_intro'        => 20000,
+		'autoreply_body'    => 20000,
+		'placeholder'       => 20000,
+		'help_text'         => 20000,
+	);
+}
+
+function aqm_rest_len( $text ) {
+	return function_exists( 'mb_strlen' ) ? mb_strlen( (string) $text ) : strlen( (string) $text );
+}
+
+function aqm_rest_count_entries( $form_id ) {
+	global $wpdb;
+	if ( ! aqm_entries_table_exists() ) {
+		return 0;
+	}
+	$table = aqm_table( 'contact_entries' );
+	return (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM $table WHERE form_id = %d", $form_id ) ); // phpcs:ignore
+}
+
+/* ---------- GET /aqm/v1/forms ---------- */
+
+function aqm_rest_list_forms() {
+	$out = array();
+	foreach ( aqm_get_forms() as $form ) {
+		$out[] = array(
+			'id'          => (int) $form->id,
+			'form_name'   => $form->form_name,
+			'shortcode'   => '[aqm_form id="' . (int) $form->id . '"]',
+			'fields'      => count( aqm_get_fields( $form->id ) ),
+			'submissions' => aqm_rest_count_entries( $form->id ),
+		);
+	}
+	return rest_ensure_response( array( 'forms' => $out ) );
+}
+
+/* ---------- GET /aqm/v1/forms/{id} ---------- */
+
+function aqm_rest_export_form( WP_REST_Request $req ) {
+	$form = aqm_get_form( (int) $req['id'] );
+	if ( ! $form ) {
+		return new WP_Error( 'aqm_not_found', 'No form with that ID.', array( 'status' => 404 ) );
+	}
+	return rest_ensure_response( aqm_rest_form_to_array( $form ) );
+}
+
+/**
+ * One form as the exact shape import accepts, so export -> edit -> import
+ * is a round trip with nothing lost in between.
+ */
+function aqm_rest_form_to_array( $form ) {
+	$fields = array();
+	foreach ( aqm_get_fields( $form->id ) as $f ) {
+		$one = array(
+			'key'         => $f->field_key,
+			'label'       => $f->label,
+			'type'        => $f->field_type,
+			'required'    => (bool) $f->required,
+			'enabled'     => (bool) $f->enabled,
+			'placeholder' => $f->placeholder,
+			'help_text'   => $f->help_text,
+			'default'     => $f->default_value,
+		);
+
+		if ( 'number' === $f->field_type ) {
+			$one['number'] = array(
+				'whole'   => (bool) $f->num_whole,
+				'min'     => $f->num_min,
+				'max'     => $f->num_max,
+				'default' => $f->num_default,
+			);
+		}
+
+		if ( in_array( $f->field_type, aqm_option_types(), true ) ) {
+			$labels = array();
+			foreach ( aqm_get_options( $f->id ) as $opt ) {
+				$labels[] = $opt->label;
+			}
+			$one['options'] = $labels;
+		}
+
+		$fields[] = $one;
+	}
+
+	return array(
+		'id'                => (int) $form->id,
+		'form_name'         => $form->form_name,
+		'notify_email'      => $form->notify_email,
+		'notify_cc'         => $form->notify_cc,
+		'email_subject'     => $form->email_subject,
+		'form_intro'        => $form->form_intro,
+		'success_message'   => $form->success_message,
+		'captcha_enabled'   => (bool) $form->captcha_enabled,
+		'spam_protection'   => (bool) $form->spam_protection,
+		'store_ip'          => (bool) $form->store_ip,
+		'autoreply_enabled' => (bool) $form->autoreply_enabled,
+		'autoreply_subject' => $form->autoreply_subject,
+		'autoreply_body'    => $form->autoreply_body,
+		'shortcode'         => '[aqm_form id="' . (int) $form->id . '"]',
+		'fields'            => $fields,
+	);
+}
+
+/* ---------- POST /aqm/v1/forms ---------- */
+
+function aqm_rest_import_form( WP_REST_Request $req ) {
+	global $wpdb;
+
+	$body = $req->get_json_params();
+	if ( ! is_array( $body ) ) {
+		return new WP_Error( 'aqm_bad_body', 'Send a JSON object describing the form.', array( 'status' => 400 ) );
+	}
+
+	$dry_run = ! empty( $body['dry_run'] );
+	$prune   = ! empty( $body['prune'] );
+	$force   = ! empty( $body['force'] );
+
+	$errors   = array();
+	$warnings = array();
+	$lim      = aqm_rest_limits();
+
+	/* ---- validate the form settings ---- */
+
+	$name = isset( $body['form_name'] ) ? sanitize_text_field( (string) $body['form_name'] ) : '';
+	if ( '' === $name ) {
+		$errors[] = 'form_name is required.';
+	} elseif ( aqm_rest_len( $name ) > $lim['form_name'] ) {
+		$errors[] = sprintf( 'form_name is %d characters; the column holds %d.', aqm_rest_len( $name ), $lim['form_name'] );
+	}
+
+	$email = isset( $body['notify_email'] ) ? sanitize_email( (string) $body['notify_email'] ) : '';
+	if ( '' !== $email && ! is_email( $email ) ) {
+		$errors[] = 'notify_email is not a valid address: ' . $email;
+	}
+	if ( '' === $email ) {
+		$warnings[] = 'notify_email is empty - submissions will be stored but no notification will be sent.';
+	}
+
+	$cc = array();
+	if ( ! empty( $body['notify_cc'] ) ) {
+		foreach ( preg_split( '/[,;]+/', (string) $body['notify_cc'] ) as $one ) {
+			$one = sanitize_email( trim( $one ) );
+			if ( is_email( $one ) ) {
+				$cc[] = $one;
+			} elseif ( '' !== trim( $one ) ) {
+				$errors[] = 'notify_cc contains an invalid address: ' . $one;
+			}
+		}
+	}
+	$cc_joined = implode( ', ', $cc );
+
+	$text_settings = array(
+		'email_subject'     => 'email_subject',
+		'autoreply_subject' => 'autoreply_subject',
+		'success_message'   => 'success_message',
+	);
+	$settings      = array();
+	foreach ( $text_settings as $key => $limit_key ) {
+		$val = isset( $body[ $key ] ) ? sanitize_text_field( (string) $body[ $key ] ) : '';
+		if ( aqm_rest_len( $val ) > $lim[ $limit_key ] ) {
+			$errors[] = sprintf( '%s is %d characters; the column holds %d.', $key, aqm_rest_len( $val ), $lim[ $limit_key ] );
+		}
+		$settings[ $key ] = $val;
+	}
+
+	foreach ( array( 'form_intro', 'autoreply_body' ) as $key ) {
+		$val = isset( $body[ $key ] ) ? sanitize_textarea_field( (string) $body[ $key ] ) : '';
+		if ( aqm_rest_len( $val ) > $lim[ $key ] ) {
+			$errors[] = sprintf( '%s is %d characters; the cap is %d.', $key, aqm_rest_len( $val ), $lim[ $key ] );
+		}
+		$settings[ $key ] = $val;
+	}
+
+	if ( aqm_rest_len( $cc_joined ) > $lim['notify_cc'] ) {
+		$errors[] = 'notify_cc is too long once joined; the column holds ' . $lim['notify_cc'] . '.';
+	}
+
+	/* ---- validate the fields ---- */
+
+	$raw_fields = isset( $body['fields'] ) && is_array( $body['fields'] ) ? $body['fields'] : array();
+	if ( ! $raw_fields ) {
+		$errors[] = 'fields is required and must contain at least one field.';
+	}
+
+	$types  = aqm_field_types();
+	$clean  = array();
+	$keys   = array();
+	$labels = array();
+
+	foreach ( $raw_fields as $i => $rf ) {
+		$where = 'field ' . ( $i + 1 );
+		if ( ! is_array( $rf ) ) {
+			$errors[] = $where . ' is not an object.';
+			continue;
+		}
+
+		$label = isset( $rf['label'] ) ? sanitize_text_field( (string) $rf['label'] ) : '';
+		if ( '' === $label ) {
+			$errors[] = $where . ' has no label.';
+			continue;
+		}
+		$where .= ' ("' . $label . '")';
+		if ( aqm_rest_len( $label ) > $lim['field_label'] ) {
+			$errors[] = $where . ' label is ' . aqm_rest_len( $label ) . ' characters; the column holds ' . $lim['field_label'] . '.';
+		}
+
+		$type = isset( $rf['type'] ) ? sanitize_key( (string) $rf['type'] ) : 'text';
+		if ( ! array_key_exists( $type, $types ) ) {
+			$errors[] = $where . ' has type "' . $type . '", which this plugin cannot render. Valid: ' . implode( ', ', array_keys( $types ) ) . '.';
+			continue;
+		}
+
+		$key       = isset( $rf['key'] ) ? sanitize_key( (string) $rf['key'] ) : '';
+		$key_given = ( '' !== $key );
+		if ( '' === $key ) {
+			// Same slug rule the builder uses, minus the collision suffix -
+			// that is applied later, and only when actually inserting.
+			$key = preg_replace( '/_+/', '_', trim( preg_replace( '/[^a-z0-9_]/', '_', strtolower( $label ) ), '_' ) );
+			if ( '' === $key ) {
+				$key = 'field';
+			}
+		}
+		if ( aqm_rest_len( $key ) > $lim['field_key'] ) {
+			$errors[] = $where . ' key is longer than ' . $lim['field_key'] . ' characters.';
+		}
+		if ( isset( $keys[ $key ] ) ) {
+			$errors[] = $where . ' repeats the key "' . $key . '". Keys must be unique within a form - the CSV export uses them as column identity.';
+			continue;
+		}
+		$keys[ $key ] = true;
+
+		// Two fields with the same label produce one CSV column holding two
+		// different questions' answers. That is a data problem, not a style one.
+		$lower = strtolower( $label );
+		if ( isset( $labels[ $lower ] ) ) {
+			$errors[] = $where . ' repeats the label "' . $label . '" used by field ' . $labels[ $lower ] . '.';
+		} else {
+			$labels[ $lower ] = $i + 1;
+		}
+
+		$default = isset( $rf['default'] ) ? sanitize_text_field( (string) $rf['default'] ) : '';
+		if ( aqm_rest_len( $default ) > $lim['field_default'] ) {
+			$errors[] = $where . ' default is longer than ' . $lim['field_default'] . ' characters.';
+		}
+
+		$ph   = isset( $rf['placeholder'] ) ? sanitize_text_field( (string) $rf['placeholder'] ) : '';
+		$help = isset( $rf['help_text'] ) ? sanitize_text_field( (string) $rf['help_text'] ) : '';
+		foreach ( array( 'placeholder' => $ph, 'help_text' => $help ) as $k => $v ) {
+			if ( aqm_rest_len( $v ) > $lim[ $k ] ) {
+				$errors[] = $where . ' ' . $k . ' exceeds the ' . $lim[ $k ] . ' character cap.';
+			}
+		}
+
+		/* options */
+		$options   = array();
+		$has_opts  = isset( $rf['options'] ) && is_array( $rf['options'] );
+		$takes_opt = in_array( $type, aqm_option_types(), true );
+
+		if ( $has_opts && ! $takes_opt ) {
+			$errors[] = $where . ' is a "' . $type . '" field and cannot hold options. Only ' . implode( ', ', aqm_option_types() ) . ' can.';
+		}
+		if ( $takes_opt ) {
+			if ( ! $has_opts || ! $rf['options'] ) {
+				// A dropdown with no options renders as an empty list nobody
+				// can complete, and the field is usually required.
+				$errors[] = $where . ' is a "' . $type . '" field with no options.';
+			} else {
+				$seen = array();
+				foreach ( $rf['options'] as $opt ) {
+					$opt = trim( sanitize_text_field( (string) $opt ) );
+					if ( '' === $opt ) {
+						continue;
+					}
+					if ( aqm_rest_len( $opt ) > $lim['option_label'] ) {
+						$errors[] = $where . ' has an option longer than ' . $lim['option_label'] . ' characters: ' . $opt;
+						continue;
+					}
+					if ( isset( $seen[ strtolower( $opt ) ] ) ) {
+						$warnings[] = $where . ' lists "' . $opt . '" twice; the duplicate was dropped.';
+						continue;
+					}
+					$seen[ strtolower( $opt ) ] = true;
+					$options[]                  = $opt;
+				}
+			}
+		}
+
+		/* number settings */
+		$num = array(
+			'whole'   => aqm_guess_whole_number( $label ) ? 1 : 0,
+			'min'     => '',
+			'max'     => '',
+			'default' => '',
+		);
+		if ( 'number' === $type && isset( $rf['number'] ) && is_array( $rf['number'] ) ) {
+			$n            = $rf['number'];
+			$num['whole'] = ! empty( $n['whole'] ) ? 1 : 0;
+			foreach ( array( 'min', 'max', 'default' ) as $nk ) {
+				$nv          = isset( $n[ $nk ] ) ? trim( (string) $n[ $nk ] ) : '';
+				$num[ $nk ] = is_numeric( $nv ) ? $nv : '';
+			}
+			if ( '' !== $num['min'] && '' !== $num['max'] && $num['min'] + 0 > $num['max'] + 0 ) {
+				$errors[] = $where . ' has a minimum above its maximum, which nothing can satisfy.';
+			}
+		}
+
+		$clean[] = array(
+			'key'         => $key,
+			'key_given'   => $key_given,
+			'label'       => $label,
+			'type'        => $type,
+			'required'    => isset( $rf['required'] ) ? ( $rf['required'] ? 1 : 0 ) : 1,
+			'enabled'     => isset( $rf['enabled'] ) ? ( $rf['enabled'] ? 1 : 0 ) : 1,
+			'placeholder' => $ph,
+			'help_text'   => $help,
+			'default'     => $default,
+			'options'     => $options,
+			'takes_opt'   => $takes_opt,
+			'number'      => $num,
+		);
+	}
+
+	if ( $errors ) {
+		return new WP_Error(
+			'aqm_invalid',
+			'The form was not imported. ' . count( $errors ) . ' problem' . ( 1 === count( $errors ) ? '' : 's' ) . ' found.',
+			array( 'status' => 400, 'errors' => $errors, 'warnings' => $warnings )
+		);
+	}
+
+	/* ---- find the target form ---- */
+
+	$ftable = aqm_table( 'forms' );
+	$target = null;
+
+	if ( ! empty( $body['id'] ) ) {
+		$target = aqm_get_form( (int) $body['id'] );
+		if ( ! $target ) {
+			return new WP_Error( 'aqm_not_found', 'No form with id ' . (int) $body['id'] . '. Leave "id" out to create one.', array( 'status' => 404 ) );
+		}
+	} else {
+		foreach ( aqm_get_forms() as $one ) {
+			if ( strtolower( $one->form_name ) === strtolower( $name ) ) {
+				$target = $one;
+				break;
+			}
+		}
+	}
+
+	$entries = $target ? aqm_rest_count_entries( $target->id ) : 0;
+
+	/* ---- work out what will happen to each field ---- */
+
+	$existing = array();
+	if ( $target ) {
+		foreach ( aqm_get_fields( $target->id ) as $f ) {
+			$existing[ $f->field_key ] = $f;
+		}
+	}
+
+	$plan    = array();
+	$removes = array();
+
+	// Fields already on the form that this JSON does not mention. Worked out
+	// before the loop below, because a "create" only deserves a rename warning
+	// when there is an unmatched field it could plausibly be a rename OF.
+	$unmatched = array();
+	foreach ( $existing as $key => $f ) {
+		if ( ! isset( $keys[ $key ] ) ) {
+			$unmatched[] = $f;
+		}
+	}
+
+	foreach ( $clean as $pos => $cf ) {
+		$have   = $existing[ $cf['key'] ] ?? null;
+		$action = 'create';
+		$note   = '';
+
+		if ( $have ) {
+			$same = ( $have->label === $cf['label']
+				&& $have->field_type === $cf['type']
+				&& (int) $have->required === $cf['required']
+				&& (int) $have->enabled === $cf['enabled']
+				&& (string) $have->placeholder === $cf['placeholder']
+				&& (string) $have->help_text === $cf['help_text']
+				&& (string) $have->default_value === $cf['default']
+				&& (int) $have->sort_order === $pos + 1 );
+			$action = $same ? 'unchanged' : 'update';
+
+			if ( $have->field_type !== $cf['type'] ) {
+				$note = 'type changes from ' . $have->field_type . ' to ' . $cf['type'];
+				if ( $entries > 0 ) {
+					$warnings[] = $cf['key'] . ': ' . $note . ' on a form with ' . $entries .
+						' stored submission' . ( 1 === $entries ? '' : 's' ) .
+						'. Existing answers keep whatever they were and are not re-validated.';
+				}
+			}
+		}
+
+		/* The rename trap.
+
+		   With no explicit "key", the key is derived from the label - so
+		   editing a label in the JSON does not rename a field, it creates a
+		   second one and leaves the first orphaned. The CSV export keys
+		   columns by field_key, so that quietly produces two columns for one
+		   question and strands every answer already stored under the old one.
+
+		   Not guessed at, because a genuine new field looks identical from
+		   here. It is named, loudly, with the one-word fix. */
+		if ( 'create' === $action && ! $cf['key_given'] && $unmatched && $target ) {
+			$names = array();
+			foreach ( $unmatched as $u ) {
+				$names[] = '"' . $u->label . '" (key ' . $u->field_key . ')';
+			}
+			$warnings[] = 'Creating a NEW field "' . $cf['label'] . '" with key "' . $cf['key'] .
+				'", while ' . implode( ' and ', $names ) . ' on this form ' .
+				( count( $names ) > 1 ? 'are' : 'is' ) . ' unmatched. If you meant to RENAME one of those, ' .
+				'add its existing key to this field in the JSON - otherwise you get two columns for one ' .
+				'question and the answers already stored stay under the old one.';
+		}
+
+		$row = array(
+			'key'    => $cf['key'],
+			'label'  => $cf['label'],
+			'type'   => $cf['type'],
+			'action' => $action,
+		);
+		if ( '' !== $note ) {
+			$row['note'] = $note;
+		}
+		if ( $cf['takes_opt'] ) {
+			$row['options'] = count( $cf['options'] );
+		}
+		$plan[] = $row;
+	}
+
+	foreach ( $existing as $key => $f ) {
+		if ( isset( $keys[ $key ] ) ) {
+			continue;
+		}
+		$why = '';
+		if ( ! $prune ) {
+			$why = 'left in place (pass prune=true to remove fields missing from the JSON)';
+		} elseif ( $entries > 0 && ! $force ) {
+			$why = 'NOT removed: this form has ' . $entries . ' stored submission' .
+				( 1 === $entries ? '' : 's' ) . ' and deleting the field orphans that answer. Pass force=true if you mean it.';
+		} else {
+			$why = 'will be deleted';
+		}
+		$removes[] = array(
+			'key'    => $key,
+			'label'  => $f->label,
+			'action' => ( 'will be deleted' === $why ) ? 'delete' : 'keep',
+			'reason' => $why,
+		);
+	}
+
+	$report = array(
+		'dry_run'     => $dry_run,
+		'form'        => array(
+			'id'     => $target ? (int) $target->id : null,
+			'name'   => $name,
+			'action' => $target ? 'update' : 'create',
+		),
+		'submissions' => $entries,
+		'fields'      => $plan,
+		'other_fields' => $removes,
+		'warnings'    => $warnings,
+	);
+
+	if ( $dry_run ) {
+		$report['message'] = 'Nothing was written. Re-send without dry_run to apply this.';
+		return rest_ensure_response( $report );
+	}
+
+	/* ---- write ---- */
+
+	// InnoDB gives us all-or-nothing. On MyISAM these are no-ops and the
+	// import is not atomic; say so rather than implying a guarantee.
+	$wpdb->query( 'START TRANSACTION' ); // phpcs:ignore
+
+	$form_row = array(
+		'form_name'         => $name,
+		'notify_email'      => $email,
+		'notify_cc'         => $cc_joined,
+		'email_subject'     => $settings['email_subject'],
+		'form_intro'        => $settings['form_intro'],
+		'success_message'   => $settings['success_message'],
+		'autoreply_subject' => $settings['autoreply_subject'],
+		'autoreply_body'    => $settings['autoreply_body'],
+		'captcha_enabled'   => isset( $body['captcha_enabled'] ) ? ( $body['captcha_enabled'] ? 1 : 0 ) : 1,
+		'spam_protection'   => isset( $body['spam_protection'] ) ? ( $body['spam_protection'] ? 1 : 0 ) : 1,
+		'store_ip'          => ! empty( $body['store_ip'] ) ? 1 : 0,
+		'autoreply_enabled' => isset( $body['autoreply_enabled'] ) ? ( $body['autoreply_enabled'] ? 1 : 0 ) : 1,
+	);
+	$form_fmt = array( '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%d', '%d', '%d' );
+
+	if ( $target ) {
+		$form_id = (int) $target->id;
+		$ok      = $wpdb->update( $ftable, $form_row, array( 'id' => $form_id ), $form_fmt, array( '%d' ) );
+		if ( false === $ok ) {
+			$wpdb->query( 'ROLLBACK' ); // phpcs:ignore
+			return new WP_Error( 'aqm_write_failed', 'Could not update the form: ' . $wpdb->last_error, array( 'status' => 500 ) );
+		}
+	} else {
+		$form_row['created_at'] = current_time( 'mysql' );
+		$form_fmt[]             = '%s';
+		if ( false === $wpdb->insert( $ftable, $form_row, $form_fmt ) ) {
+			$wpdb->query( 'ROLLBACK' ); // phpcs:ignore
+			return new WP_Error( 'aqm_write_failed', 'Could not create the form: ' . $wpdb->last_error, array( 'status' => 500 ) );
+		}
+		$form_id = (int) $wpdb->insert_id;
+	}
+
+	$fields_table  = aqm_table( 'form_fields' );
+	$options_table = aqm_table( 'field_options' );
+	$fail          = null;
+
+	foreach ( $clean as $pos => $cf ) {
+		$have = $existing[ $cf['key'] ] ?? null;
+		$row  = array(
+			'label'         => $cf['label'],
+			'field_type'    => $cf['type'],
+			'placeholder'   => $cf['placeholder'],
+			'help_text'     => $cf['help_text'],
+			'default_value' => $cf['default'],
+			'required'      => $cf['required'],
+			'enabled'       => $cf['enabled'],
+			'sort_order'    => $pos + 1,
+			'num_whole'     => $cf['number']['whole'],
+			'num_min'       => $cf['number']['min'],
+			'num_max'       => $cf['number']['max'],
+			'num_default'   => $cf['number']['default'],
+		);
+		$fmt = array( '%s', '%s', '%s', '%s', '%s', '%d', '%d', '%d', '%d', '%s', '%s', '%s' );
+
+		if ( $have ) {
+			$field_id = (int) $have->id;
+			if ( false === $wpdb->update( $fields_table, $row, array( 'id' => $field_id ), $fmt, array( '%d' ) ) ) {
+				$fail = 'field "' . $cf['label'] . '": ' . $wpdb->last_error;
+				break;
+			}
+		} else {
+			$row['form_id']   = $form_id;
+			$row['field_key'] = $cf['key'];
+			$fmt[]            = '%d';
+			$fmt[]            = '%s';
+			if ( false === $wpdb->insert( $fields_table, $row, $fmt ) ) {
+				$fail = 'field "' . $cf['label'] . '": ' . $wpdb->last_error;
+				break;
+			}
+			$field_id = (int) $wpdb->insert_id;
+		}
+
+		if ( ! $cf['takes_opt'] ) {
+			// Switching a dropdown to a text field leaves its options behind
+			// as invisible rows that reappear if it is switched back.
+			$wpdb->delete( $options_table, array( 'field_id' => $field_id ), array( '%d' ) );
+			continue;
+		}
+
+		// Options are reconciled by label, not rewritten wholesale, so an
+		// option's ID survives and the stored answers that reference its
+		// label keep meaning the same thing.
+		$current = array();
+		foreach ( aqm_get_options( $field_id ) as $opt ) {
+			$current[ strtolower( $opt->label ) ] = $opt;
+		}
+
+		$order = 0;
+		foreach ( $cf['options'] as $label ) {
+			$order++;
+			$lower = strtolower( $label );
+			if ( isset( $current[ $lower ] ) ) {
+				$wpdb->update(
+					$options_table,
+					array( 'label' => $label, 'sort_order' => $order ),
+					array( 'id' => (int) $current[ $lower ]->id ),
+					array( '%s', '%d' ),
+					array( '%d' )
+				);
+				unset( $current[ $lower ] );
+			} elseif ( false === $wpdb->insert(
+				$options_table,
+				array( 'field_id' => $field_id, 'label' => $label, 'sort_order' => $order ),
+				array( '%d', '%s', '%d' )
+			) ) {
+				$fail = 'option "' . $label . '": ' . $wpdb->last_error;
+				break 2;
+			}
+		}
+
+		// Anything left is an option the JSON no longer lists.
+		foreach ( $current as $stale ) {
+			if ( $prune ) {
+				$wpdb->delete( $options_table, array( 'id' => (int) $stale->id ), array( '%d' ) );
+			} else {
+				$warnings[] = 'Option "' . $stale->label . '" on "' . $cf['label'] .
+					'" is not in the JSON and was left in place (prune=true removes it).';
+			}
+		}
+	}
+
+	if ( null !== $fail ) {
+		$wpdb->query( 'ROLLBACK' ); // phpcs:ignore
+		return new WP_Error( 'aqm_write_failed', 'Import rolled back at ' . $fail, array( 'status' => 500 ) );
+	}
+
+	foreach ( $removes as $r ) {
+		if ( 'delete' !== $r['action'] ) {
+			continue;
+		}
+		$gone = $existing[ $r['key'] ];
+		$wpdb->delete( $options_table, array( 'field_id' => (int) $gone->id ), array( '%d' ) );
+		$wpdb->delete( $fields_table, array( 'id' => (int) $gone->id, 'form_id' => $form_id ), array( '%d', '%d' ) );
+	}
+
+	$wpdb->query( 'COMMIT' ); // phpcs:ignore
+
+	$report['form']['id'] = $form_id;
+	$report['warnings']   = $warnings;
+	$report['shortcode']  = '[aqm_form id="' . $form_id . '"]';
+	$report['message']    = 'Imported. Put ' . $report['shortcode'] . ' on a draft page and test it before it goes anywhere public.';
+
+	return rest_ensure_response( $report );
+}
+
+
+/* ══════════════════════════════════════════════════════════════
+   14. SELF-UPDATE FROM GITHUB RELEASES
 
    To release: bump the Version header AND AQM_VERSION to match,
    tag the release v<version> on GitHub, and attach the built .zip.
@@ -3741,7 +4472,7 @@ function aqm_update_check_notice() {
 }
 
 /* ══════════════════════════════════════════════════════════════
-   14. UNINSTALL
+   15. UNINSTALL
    ══════════════════════════════════════════════════════════════ */
 
 register_uninstall_hook( __FILE__, 'aqm_uninstall' );
