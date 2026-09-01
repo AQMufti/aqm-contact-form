@@ -3,7 +3,7 @@
  * Plugin Name:       A. Q. Mufti - Contact Form
  * Plugin URI:        https://github.com/AQMufti/aqm-contact-form
  * Description:       Multi-form builder. Each form has independent fields, dropdowns, editable comboboxes, multi-pick checkbox groups, per-field help text, default values, CAPTCHA, spam protection and required/optional settings. Shortcode: [aqm_form id="N"]
- * Version:           7.6.0
+ * Version:           7.7.0
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            A. Q. Mufti
@@ -16,7 +16,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'AQM_VERSION', '7.6.0' );
+define( 'AQM_VERSION', '7.7.0' );
 define( 'AQM_DB_VERSION', 11 );
 define( 'AQM_FILE', __FILE__ );
 
@@ -840,9 +840,15 @@ function aqm_handle_submission() {
 		$val = $values[ $key ];
 
 		if ( $f->required && aqm_value_is_blank( $val ) ) {
-			$errors[ $key ] = 'multiselect' === $f->field_type
-				? 'Please choose at least one option for "' . $f->label . '".'
-				: 'Please complete "' . $f->label . '".';
+			if ( 'multiselect' === $f->field_type ) {
+				$errors[ $key ] = 'Please choose at least one option for "' . $f->label . '".';
+			} elseif ( 'checkbox' === $f->field_type ) {
+				// A tick box is not "completed". Consent boxes are the common
+				// case here and the wording has to make sense on one.
+				$errors[ $key ] = 'Please tick the box to continue.';
+			} else {
+				$errors[ $key ] = 'Please complete "' . $f->label . '".';
+			}
 			continue;
 		}
 
@@ -2638,6 +2644,32 @@ function aqm_admin_builder_page() {
 									</td>
 								</tr>
 								<tr>
+									<th>Consent &amp; privacy</th>
+									<td>
+										<?php $fb_privacy = aqm_privacy_url(); ?>
+										<p>Write <code>{privacy_policy}</code> or <code>{optout}</code> into any field&#8217;s help text, the words beside a tick box, the introduction above, or an auto-reply. Each becomes a link when the page exists, and plain words when it does not &mdash; so a form never shows a broken link.</p>
+
+										<?php if ( '' !== $fb_privacy ) : ?>
+											<p><span style="color:#1e7b34">&#10003;</span> <strong>Privacy policy published:</strong>
+												<a href="<?php echo esc_url( $fb_privacy ); ?>" target="_blank" rel="noopener"><?php echo esc_html( $fb_privacy ); ?></a>
+											</p>
+										<?php else : ?>
+											<p style="color:#8a1f11"><strong>&#9888; No privacy policy is published.</strong> If your consent wording mentions one, it is promising a page nobody can read.</p>
+											<p><strong>To create one:</strong> go to <a href="<?php echo esc_url( admin_url( 'options-privacy.php' ) ); ?>">Settings &rarr; Privacy</a>. WordPress can generate a draft for you. Replace the &#8220;Suggested text&#8221; placeholders with what <em>you</em> actually do, then <strong>publish it</strong> &mdash; a draft does not count &mdash; and make sure it is the page selected on that screen.</p>
+										<?php endif; ?>
+
+										<p><strong>Keeping it current.</strong> A privacy policy is not a one-off. Review it whenever any of these change:</p>
+										<ul style="list-style:disc;margin-left:20px">
+											<li>the information you collect &mdash; every new field on a form is a new thing you hold</li>
+											<li>who else sees it: a CRM, a mailing tool, an analytics or chat plugin</li>
+											<li>how long you keep submissions, and who can read them</li>
+											<li>how someone asks for their data, or asks you to delete it</li>
+											<li>the promises in your consent wording &mdash; if the form says it, the policy has to back it</li>
+										</ul>
+										<p class="description">Worth a look once a year even when nothing has changed, and a note of the date you last reviewed it. The opt-out page is set under <a href="<?php echo esc_url( admin_url( 'admin.php?page=aqm-settings' ) ); ?>">AQM Contact &rarr; Settings</a>.</p>
+									</td>
+								</tr>
+								<tr>
 									<th><label for="fs_success">Thank-you message</label></th>
 									<td>
 										<input type="text" id="fs_success" name="success_message" value="<?php echo esc_attr( $form->success_message ); ?>" maxlength="255" style="width:100%">
@@ -3057,6 +3089,16 @@ function aqm_admin_submissions_page() {
 		<?php if ( $form_id ) : ?>
 			<a href="<?php echo esc_url( $export_url ); ?>" class="page-title-action">Export CSV</a>
 		<?php endif; ?>
+		<?php
+		$export_all_url = wp_nonce_url(
+			add_query_arg(
+				array( 'action' => 'aqm_export_entries', 'form_id' => 0, 's' => $search ),
+				admin_url( 'admin-post.php' )
+			),
+			'aqm_export_entries'
+		);
+		?>
+		<a href="<?php echo esc_url( $export_all_url ); ?>" class="page-title-action">Export all forms</a>
 		<hr class="wp-header-end">
 
 		<?php aqm_render_notice(); ?>
@@ -3192,16 +3234,40 @@ function aqm_export_entries() {
 	$form_id = (int) ( $_GET['form_id'] ?? 0 );
 	$search  = isset( $_GET['s'] ) ? sanitize_text_field( wp_unslash( $_GET['s'] ) ) : '';
 	$form    = $form_id ? aqm_get_form( $form_id ) : null;
+	$all     = ! $form;
 
-	if ( ! $form ) {
-		wp_die( 'Choose a form before exporting.' );
+	$table = aqm_table( 'contact_entries' );
+
+	/* Every form, or one.
+
+	   Exporting everything answers the question a per-form export cannot:
+	   "has this person ever written in, and what did they agree to?" With
+	   consent handled by hand, that is the search you actually run.
+
+	   Forms do not share a field list, so the columns are the union of every
+	   field across every form, keyed by field_key. A label used by several
+	   forms stays one column; anything unique to one form gets its own and is
+	   simply blank elsewhere. */
+	if ( $all ) {
+		$columns = array();
+		foreach ( aqm_get_forms() as $one ) {
+			foreach ( aqm_get_fields( $one->id ) as $f ) {
+				if ( ! isset( $columns[ $f->field_key ] ) ) {
+					$columns[ $f->field_key ] = $f->label;
+				}
+			}
+		}
+		$sql    = "SELECT * FROM $table WHERE 1=%d";
+		$params = array( 1 );
+	} else {
+		$columns = array();
+		foreach ( aqm_get_fields( $form_id ) as $f ) {
+			$columns[ $f->field_key ] = $f->label;
+		}
+		$sql    = "SELECT * FROM $table WHERE form_id = %d";
+		$params = array( $form_id );
 	}
 
-	$fields = aqm_get_fields( $form_id );
-	$table  = aqm_table( 'contact_entries' );
-
-	$params = array( $form_id );
-	$sql    = "SELECT * FROM $table WHERE form_id = %d";
 	if ( '' !== $search ) {
 		$sql     .= ' AND form_data LIKE %s';
 		$params[] = '%' . $wpdb->esc_like( $search ) . '%';
@@ -3212,14 +3278,18 @@ function aqm_export_entries() {
 
 	nocache_headers();
 	header( 'Content-Type: text/csv; charset=UTF-8' );
-	header( 'Content-Disposition: attachment; filename=aqm-' . sanitize_title( $form->form_name ) . '-' . gmdate( 'Y-m-d' ) . '.csv' );
+	$slug = $all ? 'all-forms' : sanitize_title( $form->form_name );
+	header( 'Content-Disposition: attachment; filename=aqm-' . $slug . '-' . gmdate( 'Y-m-d' ) . '.csv' );
 
 	$out = fopen( 'php://output', 'w' );
 	fwrite( $out, "\xEF\xBB\xBF" ); // BOM, so Excel reads UTF-8 correctly.
 
 	$header = array( 'ID' );
-	foreach ( $fields as $f ) {
-		$header[] = $f->label;
+	if ( $all ) {
+		$header[] = 'Form';
+	}
+	foreach ( $columns as $label ) {
+		$header[] = $label;
 	}
 	$header[] = 'Submitted';
 	$header[] = 'IP Address';
@@ -3233,8 +3303,14 @@ function aqm_export_entries() {
 		$data = is_array( $data ) ? $data : array();
 
 		$row = array( $e->id );
-		foreach ( $fields as $f ) {
-			$row[] = $data[ $f->field_key ] ?? '';
+		if ( $all ) {
+			// form_name is stored on the entry, so a submission whose form
+			// has since been deleted still says where it came from.
+			$row[] = $e->form_name;
+		}
+		foreach ( $columns as $key => $label ) {
+			$val   = $data[ $key ] ?? '';
+			$row[] = is_array( $val ) ? implode( ', ', $val ) : $val;
 		}
 		$row[] = $e->submitted_at;
 		$row[] = $e->ip_address;
@@ -3422,6 +3498,7 @@ function aqm_admin_settings_page() {
 							<p><a href="<?php echo esc_url( admin_url( 'options-privacy.php' ) ); ?>">Set or create one under Settings &rarr; Privacy</a> - WordPress can generate a starter policy for you.</p>
 						<?php endif; ?>
 						<p class="description">Taken from WordPress&#8217;s own setting, so it stays in step with the rest of the site.</p>
+						<p><strong>Keeping it current.</strong> Review the policy whenever the information you collect changes, whenever another service starts seeing it (a CRM, a mailing tool, an analytics or chat plugin), or whenever your consent wording starts promising something the policy does not cover. Worth a look once a year regardless.</p>
 					</td>
 				</tr>
 				<tr>
