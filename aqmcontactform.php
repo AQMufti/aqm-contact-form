@@ -3,7 +3,7 @@
  * Plugin Name:       A. Q. Mufti - Contact Form
  * Plugin URI:        https://github.com/AQMufti/aqm-contact-form
  * Description:       Multi-form builder. Each form has independent fields, dropdowns, editable comboboxes, multi-pick checkbox groups, per-field help text, default values, CAPTCHA, spam protection and required/optional settings. Shortcode: [aqm_form id="N"]
- * Version:           7.8.1
+ * Version:           7.8.2
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            A. Q. Mufti
@@ -16,7 +16,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'AQM_VERSION', '7.8.1' );
+define( 'AQM_VERSION', '7.8.2' );
 define( 'AQM_DB_VERSION', 11 );
 define( 'AQM_FILE', __FILE__ );
 
@@ -1026,6 +1026,23 @@ function aqm_mail_from_address() {
 }
 
 /**
+ * The name an email appears to come FROM.
+ *
+ * Defaults to the site title, which is right for most sites. It is separate
+ * from the address, and separate from the {site_name} token, because they
+ * answer different questions: the token means "which website is this", the
+ * From name means "who is writing to me". A site whose title is a domain,
+ * or a trading name, or anything a person would not expect to see in their
+ * inbox, wants those to differ.
+ *
+ *     add_filter( 'aqm_from_name', fn() => 'Jane Smith' );
+ */
+function aqm_mail_from_name() {
+	$name = wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES );
+	return apply_filters( 'aqm_from_name', $name );
+}
+
+/**
  * The grey line of guidance under a field.
  *
  * One place decides what a visitor reads, so a combobox, a number with a
@@ -1232,7 +1249,7 @@ function aqm_send_notification( $form, $fields, array $data, $entry_id ) {
 	$site_name = wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES );
 	$headers   = array(
 		'Content-Type: text/plain; charset=UTF-8',
-		'From: ' . $site_name . ' <' . aqm_mail_from_address() . '>',
+		'From: ' . aqm_mail_from_name() . ' <' . aqm_mail_from_address() . '>',
 	);
 
 	// sanitize_text_field already strips newlines, so header injection is not
@@ -1279,7 +1296,7 @@ function aqm_send_autoreply( $form, $fields, array $data ) {
 
 	$headers = array(
 		'Content-Type: text/plain; charset=UTF-8',
-		'From: ' . $site_name . ' <' . aqm_mail_from_address() . '>',
+		'From: ' . aqm_mail_from_name() . ' <' . aqm_mail_from_address() . '>',
 	);
 	if ( is_email( $form->notify_email ) ) {
 		$headers[] = 'Reply-To: ' . $form->notify_email;
@@ -3569,10 +3586,11 @@ function aqm_admin_settings_page() {
    IDENTIFYING A FORM
 
    By "id" if you pass one, otherwise by exact form_name, otherwise it
-   is created. Form IDs are not stable or predictable - AQ's install
-   starts at 2 because the seeded form was deleted - so name matching
-   is the reliable route and the response always reports the id it
-   used, which is the number the [aqm_form id="N"] shortcode needs.
+   is created. Form IDs are not stable or predictable - a deleted form
+   leaves its number behind, so an install's first form is not
+   necessarily 1 - which makes name matching the reliable route. The
+   response always reports the id it used, and that is the number the
+   [aqm_form id="N"] shortcode needs.
    ══════════════════════════════════════════════════════════════ */
 
 add_action( 'rest_api_init', 'aqm_rest_routes' );
