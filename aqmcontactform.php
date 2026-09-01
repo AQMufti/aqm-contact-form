@@ -3,7 +3,7 @@
  * Plugin Name:       A. Q. Mufti - Contact Form
  * Plugin URI:        https://github.com/AQMufti/aqm-contact-form
  * Description:       Multi-form builder. Each form has independent fields, dropdowns, editable comboboxes, multi-pick checkbox groups, per-field help text, default values, CAPTCHA, spam protection and required/optional settings. Shortcode: [aqm_form id="N"]
- * Version:           7.8.0
+ * Version:           7.8.1
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            A. Q. Mufti
@@ -16,7 +16,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'AQM_VERSION', '7.8.0' );
+define( 'AQM_VERSION', '7.8.1' );
 define( 'AQM_DB_VERSION', 11 );
 define( 'AQM_FILE', __FILE__ );
 
@@ -2898,14 +2898,14 @@ function aqm_admin_builder_page() {
 						</p>
 						<p>
 							<label for="aqm_field_help"><strong>Help text</strong></label>
-							<input type="text" id="aqm_field_help" name="aqm_field_help" maxlength="300"
+							<input type="text" id="aqm_field_help" name="aqm_field_help" maxlength="2000"
 								value="<?php echo esc_attr( $editing_field ? aqm_col( $editing_field, 'help_text' ) : '' ); ?>"
 								placeholder="Why you are asking, or what to put" style="width:100%;margin-top:4px">
 							<span class="description" style="display:block;margin-top:3px">A grey line under the field. This is where an explanation belongs &mdash; not in the label.</span>
 						</p>
 						<p>
 							<label for="aqm_field_placeholder"><strong id="aqm_ph_label">Placeholder</strong></label>
-							<input type="text" id="aqm_field_placeholder" name="aqm_field_placeholder" maxlength="200"
+							<input type="text" id="aqm_field_placeholder" name="aqm_field_placeholder" maxlength="2000"
 								value="<?php echo esc_attr( $editing_field ? $editing_field->placeholder : '' ); ?>"
 								placeholder="e.g. nut allergy" style="width:100%;margin-top:4px">
 							<span class="description" style="display:block;margin-top:3px" id="aqm_ph_help">Grey example text inside the box. It disappears as soon as they type and is <strong>never submitted</strong>. Not a default value.</span>
@@ -3642,8 +3642,8 @@ function aqm_rest_limits() {
 		// TEXT columns. Capped only to keep a runaway payload out of the DB.
 		'form_intro'        => 20000,
 		'autoreply_body'    => 20000,
-		'placeholder'       => 20000,
-		'help_text'         => 20000,
+		'placeholder'       => 2000,
+		'help_text'         => 2000,
 	);
 }
 
